@@ -1,0 +1,470 @@
+package com.example.carlink
+
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import kotlin.math.roundToInt
+
+internal val Bg = Color(0xFF0E1116)
+internal val CardBg = Color(0xFF171C24)
+internal val Track = Color(0xFF262D38)
+internal val TextMain = Color(0xFFEAF0F7)
+internal val Muted = Color(0xFF8A96A6)
+internal val Accent = Color(0xFF4FC3F7)
+internal val Good = Color(0xFF66BB6A)
+internal val Warn = Color(0xFFFFB74D)
+internal val Bad = Color(0xFFEF5350)
+
+@Composable
+fun CarLinkTheme(content: @Composable () -> Unit) {
+    MaterialTheme(
+        colorScheme = darkColorScheme(
+            primary = Accent,
+            background = Bg,
+            surface = CardBg,
+            onSurface = TextMain,
+            onBackground = TextMain,
+        ),
+        content = content,
+    )
+}
+
+@Composable
+fun CarLinkApp(vm: CarViewModel, withBluetooth: (() -> Unit) -> Unit) {
+    var tab by remember { mutableStateOf(0) }
+    Column(Modifier.fillMaxSize().background(Bg).systemBarsPadding()) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            TabButton("დაფა", tab == 0) { tab = 0 }
+            TabButton("ექსპლორერი", tab == 1) { tab = 1 }
+        }
+        Box(Modifier.weight(1f)) {
+            if (tab == 0) Dashboard(vm, withBluetooth) else ExplorerScreen(vm)
+        }
+    }
+}
+
+internal val BtnPad = PaddingValues(horizontal = 8.dp, vertical = 10.dp)
+
+@Composable
+internal fun BtnText(t: String) = Text(t, maxLines = 1, softWrap = false, fontSize = 13.sp)
+
+@Composable
+private fun RowScope.TabButton(text: String, selected: Boolean, onClick: () -> Unit) {
+    if (selected) Button(onClick = onClick, modifier = Modifier.weight(1f), contentPadding = BtnPad) { BtnText(text) }
+    else OutlinedButton(onClick = onClick, modifier = Modifier.weight(1f), contentPadding = BtnPad) { BtnText(text) }
+}
+
+@Composable
+private fun Dashboard(vm: CarViewModel, withBluetooth: (() -> Unit) -> Unit) {
+    val ui by vm.state.collectAsState()
+    var showPicker by remember { mutableStateOf(false) }
+    var showClear by remember { mutableStateOf(false) }
+    var devices by remember { mutableStateOf(emptyList<Pair<String, String>>()) }
+    val connected = ui.connection == Conn.Connected
+    val snap = ui.snapshot
+
+    Column(
+        Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        // სათაური
+        Column {
+            Text("Chevrolet Cruze 2017", color = TextMain, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+            Spacer4()
+            StatusRow(ui)
+        }
+
+        // ღილაკები
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+            if (connected || ui.connection == Conn.Connecting) {
+                Button(
+                    onClick = { vm.disconnect() },
+                    modifier = Modifier.weight(1f),
+                    contentPadding = BtnPad,
+                    colors = ButtonDefaults.buttonColors(containerColor = Track, contentColor = TextMain),
+                ) { BtnText("გათიშვა") }
+            } else {
+                Button(onClick = { withBluetooth { vm.connect(demo = false) } }, modifier = Modifier.weight(1f), contentPadding = BtnPad) { BtnText("დაკავშირება") }
+            }
+            OutlinedButton(modifier = Modifier.weight(1f), contentPadding = BtnPad, onClick = {
+                withBluetooth {
+                    devices = vm.pairedDevices()
+                    showPicker = true
+                }
+            }) { BtnText("ადაპტერი") }
+            OutlinedButton(onClick = { vm.connect(demo = true) }, modifier = Modifier.weight(1f), contentPadding = BtnPad) { BtnText("დემო") }
+        }
+
+        if (ui.error != null) {
+            Card { Text(ui.error ?: "", color = Bad, fontSize = 14.sp) }
+        }
+
+        // ბენზინი
+        Card {
+            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                FuelGauge(snap?.fuelPercent ?: if (!connected) ui.lastSaved?.fuelPercent else null)
+            }
+        }
+
+        // სენსორები
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
+            StatCard(
+                "აკუმულატორი",
+                (snap?.batteryV ?: if (!connected) ui.lastSaved?.batteryV else null)?.let { "%.1f V".format(it) } ?: "—",
+                batteryColor(snap?.batteryV),
+                Modifier.weight(1f),
+            )
+            StatCard(
+                "ძრავის ტემპ.",
+                (snap?.coolantC ?: if (!connected) ui.lastSaved?.coolantC else null)?.let { "$it °C" } ?: "—",
+                coolantColor(snap?.coolantC),
+                Modifier.weight(1f),
+            )
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
+            StatCard("ბრუნი", snap?.rpm?.let { "$it" } ?: "—", TextMain, Modifier.weight(1f))
+            StatCard("სიჩქარე", snap?.speedKmh?.let { "$it კმ/სთ" } ?: "—", TextMain, Modifier.weight(1f))
+        }
+
+        // ძრავის დიაგნოსტიკა
+        Card {
+            val m = snap?.mapKpa
+            val b = snap?.baroKpa
+            val boost = if (m != null && b != null) m - b else null
+            val st = snap?.stftPct
+            val lt = snap?.ltftPct
+            val trims = if (st != null && lt != null) "%+.1f%% / %+.1f%%".format(st, lt) else "—"
+            Text("ძრავის დიაგნოსტიკა", color = Muted, fontSize = 13.sp)
+            Spacer4()
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                MiniStat("ბუსტი (MAP − ბარო)", boost?.let { "%+d kPa".format(it) } ?: "—", Modifier.weight(1f))
+                MiniStat("MAP", m?.let { "$it kPa" } ?: "—", Modifier.weight(1f))
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth().padding(top = 10.dp)) {
+                MiniStat("ბარომეტრი", b?.let { "$it kPa" } ?: "—", Modifier.weight(1f))
+                MiniStat("ჰაერის ტემპ.", snap?.iatC?.let { "$it °C" } ?: "—", Modifier.weight(1f))
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth().padding(top = 10.dp)) {
+                MiniStat("MAF", snap?.mafGs?.let { "%.1f გ/წმ".format(it) } ?: "—", Modifier.weight(1f))
+                MiniStat("დატვირთვა", snap?.loadPct?.let { "%.0f%%".format(it) } ?: "—", Modifier.weight(1f))
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth().padding(top = 10.dp)) {
+                MiniStat("დროსელი", snap?.throttlePct?.let { "%.0f%%".format(it) } ?: "—", Modifier.weight(1f))
+                MiniStat("საწვავის კორექცია (მოკლე / გრძელი)", trims, Modifier.weight(1f))
+            }
+            Spacer4()
+            Text(
+                "ინფორმაციისთვის. ანთება ჩართული და ძრავი გამორთული: MAP ≈ ბარომეტრს. დიაგნოზს მექანიკოსი სვამს.",
+                color = Muted, fontSize = 12.sp,
+            )
+        }
+
+        // ისტორია
+        Card {
+            Text("ბენზინის ისტორია", color = Muted, fontSize = 13.sp)
+            Spacer4()
+            HistoryChart(ui.history)
+        }
+
+        // შეცდომები
+        val dtcs = snap?.dtcs ?: if (!connected) ui.lastSaved?.dtcs.orEmpty() else emptyList()
+        Card {
+            Text("შეცდომის კოდები", color = Muted, fontSize = 13.sp)
+            Spacer4()
+            if (dtcs.isEmpty()) {
+                Text(
+                    if (snap == null && ui.lastSaved == null) "მონაცემი ჯერ არ არის" else "პრობლემა არ ჩანს ✓",
+                    color = if (snap == null && ui.lastSaved == null) Muted else Good,
+                    fontSize = 16.sp,
+                )
+            } else {
+                dtcs.forEach { code ->
+                    Text(code, color = Warn, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+                    Text(DTC_INFO[code] ?: "ახსნა ჩემს სიაში არ არის", color = Muted, fontSize = 13.sp)
+                    Spacer4()
+                }
+            }
+            val pending = snap?.pendingDtcs.orEmpty().filter { it !in dtcs }
+            if (pending.isNotEmpty()) {
+                Spacer4()
+                Text("მოლოდინში (ჯერ არ დადასტურებულა)", color = Muted, fontSize = 13.sp)
+                Spacer4()
+                pending.forEach { code ->
+                    Text(code, color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    Text(DTC_INFO[code] ?: "ახსნა ჩემს სიაში არ არის", color = Muted, fontSize = 13.sp)
+                    Spacer4()
+                }
+            }
+            if (connected && (dtcs.isNotEmpty() || snap?.pendingDtcs?.isNotEmpty() == true)) {
+                Spacer4()
+                OutlinedButton(
+                    onClick = { showClear = true },
+                    modifier = Modifier.fillMaxWidth(),
+                    contentPadding = BtnPad,
+                ) { BtnText("კოდების წაშლა…") }
+            }
+            ui.clearResult?.let { msg ->
+                Spacer4()
+                Text(msg, color = if (msg.startsWith("✓")) Good else Warn, fontSize = 13.sp)
+                TextButton(onClick = { vm.dismissClearResult() }) { Text("კარგი") }
+            }
+        }
+
+        // კოდების ჟურნალი
+        if (ui.dtcLog.isNotEmpty()) {
+            Card {
+                Text("კოდების ჟურნალი", color = Muted, fontSize = 13.sp)
+                Spacer4()
+                val fmt = SimpleDateFormat("d MMM HH:mm", Locale.getDefault())
+                ui.dtcLog.takeLast(8).reversed().forEach { (t, line) ->
+                    Text("${fmt.format(Date(t))} · $line", color = TextMain, fontSize = 13.sp)
+                    Spacer4()
+                }
+            }
+        }
+
+        // ბორბლები (ჯერ არ არის რეალიზებული)
+        Card {
+            Text("ბორბლების წნევა", color = Muted, fontSize = 13.sp)
+            Spacer4()
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                listOf("წინა მარცხ.", "წინა მარჯ.").forEach { Tire(it, Modifier.weight(1f)) }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth().padding(top = 10.dp)) {
+                listOf("უკან მარცხ.", "უკან მარჯ.").forEach { Tire(it, Modifier.weight(1f)) }
+            }
+            Spacer4()
+            Text(
+                "წნევის მოთხოვნა მანქანაზე ტესტით უნდა დადგინდეს («ექსპლორერი» ჩანართი).",
+                color = Muted, fontSize = 12.sp,
+            )
+        }
+
+        // ბოლოს ნანახი
+        val saved = ui.lastSaved
+        if (!connected && saved != null) {
+            val fmt = SimpleDateFormat("d MMM, HH:mm", Locale.getDefault())
+            Card {
+                Text("ბოლოს ნანახი მდგომარეობა", color = Muted, fontSize = 13.sp)
+                Spacer4()
+                Text(fmt.format(Date(saved.timeMillis)), color = TextMain, fontSize = 16.sp)
+            }
+        }
+    }
+
+    if (showClear) {
+        val codes = (snap?.dtcs.orEmpty() + snap?.pendingDtcs.orEmpty()).distinct()
+        AlertDialog(
+            onDismissRequest = { showClear = false },
+            title = { Text("კოდების წაშლა") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("წაიშლება ძრავის (OBD-II) კოდები და Check Engine ნათურა:\n${codes.joinToString(", ").ifEmpty { "—" }}")
+                    Text("• კოდები ჯერ ინახება «კოდების ჟურნალში».", fontSize = 13.sp)
+                    Text("• თუ პრობლემა რჩება, კოდები დაბრუნდება.", fontSize = 13.sp)
+                    Text("• მზადყოფნის მონიტორები გადაიტვირთება; ტექდათვალიერებამდე გარკვეული გარბენი დასჭირდება.", fontSize = 13.sp)
+                    Text("• საჰაერო ბალიშის (SRS) ნათურა ამით არ იწმინდება.", fontSize = 13.sp)
+                    Text("მხოლოდ გაჩერებულ მანქანაზე, ძრავი ჩაქრობილი, ანთება ჩართული.", fontSize = 13.sp)
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showClear = false
+                    vm.clearDtcs()
+                }) { Text("წაშლა") }
+            },
+            dismissButton = { TextButton(onClick = { showClear = false }) { Text("გაუქმება") } },
+        )
+    }
+
+    if (showPicker) {
+        AlertDialog(
+            onDismissRequest = { showPicker = false },
+            confirmButton = { TextButton(onClick = { showPicker = false }) { Text("დახურვა") } },
+            title = { Text("აირჩიე ადაპტერი") },
+            text = {
+                Column {
+                    if (devices.isEmpty()) {
+                        Text("დაწყვილებული მოწყობილობა არ არის. ჯერ ტელეფონის Bluetooth-ის პარამეტრებში დააწყვილე ELM327 (კოდი ხშირად 1234 ან 0000).")
+                    }
+                    devices.forEach { (name, addr) ->
+                        TextButton(onClick = {
+                            vm.selectDevice(name, addr)
+                            showPicker = false
+                        }) { Text("$name\n$addr", fontSize = 14.sp) }
+                    }
+                }
+            },
+        )
+    }
+}
+
+@Composable
+internal fun Spacer4() {
+    Box(Modifier.size(4.dp))
+}
+
+@Composable
+private fun StatusRow(ui: UiState) {
+    val (text, color) = when (ui.connection) {
+        Conn.Connected -> (if (ui.demo) "დემო რეჟიმი" else "დაკავშირებულია") to Good
+        Conn.Connecting -> "ვუკავშირდები…" to Warn
+        Conn.Failed -> "კავშირი ვერ მოხერხდა" to Bad
+        Conn.Idle -> "არ არის დაკავშირებული" to Muted
+    }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.size(10.dp).clip(CircleShape).background(color))
+        Text("  $text", color = color, fontSize = 14.sp)
+        if (ui.deviceName != null) Text("  ·  ${ui.deviceName}", color = Muted, fontSize = 14.sp)
+    }
+}
+
+@Composable
+internal fun Card(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
+    Column(
+        modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(20.dp))
+            .background(CardBg)
+            .padding(16.dp),
+    ) { content() }
+}
+
+@Composable
+private fun StatCard(label: String, value: String, color: Color, modifier: Modifier = Modifier) {
+    Column(
+        modifier
+            .clip(RoundedCornerShape(20.dp))
+            .background(CardBg)
+            .padding(16.dp),
+    ) {
+        Text(label, color = Muted, fontSize = 13.sp)
+        Spacer4()
+        Text(value, color = color, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+    }
+}
+
+@Composable
+private fun MiniStat(label: String, value: String, modifier: Modifier = Modifier) {
+    Column(
+        modifier
+            .clip(RoundedCornerShape(14.dp))
+            .background(Track)
+            .padding(12.dp),
+    ) {
+        Text(label, color = Muted, fontSize = 12.sp)
+        Spacer4()
+        Text(value, color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+    }
+}
+
+@Composable
+private fun Tire(label: String, modifier: Modifier = Modifier) {
+    Column(
+        modifier
+            .clip(RoundedCornerShape(14.dp))
+            .background(Track)
+            .padding(12.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text("—", color = Muted, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+        Text(label, color = Muted, fontSize = 12.sp)
+    }
+}
+
+@Composable
+private fun FuelGauge(percent: Float?) {
+    val p = (percent ?: 0f).coerceIn(0f, 100f)
+    val color = when {
+        percent == null -> Muted
+        p < 15f -> Bad
+        p < 30f -> Warn
+        else -> Accent
+    }
+    Box(Modifier.size(180.dp), contentAlignment = Alignment.Center) {
+        Canvas(Modifier.fillMaxSize()) {
+            val stroke = 18.dp.toPx()
+            val inset = stroke / 2
+            val arcSize = Size(size.width - stroke, size.height - stroke)
+            drawArc(
+                color = Track, startAngle = 135f, sweepAngle = 270f, useCenter = false,
+                topLeft = Offset(inset, inset), size = arcSize,
+                style = Stroke(width = stroke, cap = StrokeCap.Round),
+            )
+            drawArc(
+                color = color, startAngle = 135f, sweepAngle = 270f * p / 100f, useCenter = false,
+                topLeft = Offset(inset, inset), size = arcSize,
+                style = Stroke(width = stroke, cap = StrokeCap.Round),
+            )
+        }
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(
+                if (percent == null) "—" else "${p.roundToInt()}%",
+                color = TextMain, fontSize = 36.sp, fontWeight = FontWeight.Bold,
+            )
+            Text("ბენზინი", color = Muted, fontSize = 13.sp)
+        }
+    }
+}
+
+private fun batteryColor(v: Float?): Color = when {
+    v == null -> TextMain
+    v < 11.8f -> Bad
+    v < 12.3f -> Warn
+    else -> Good
+}
+
+private fun coolantColor(c: Int?): Color = when {
+    c == null -> TextMain
+    c > 110 -> Bad
+    c > 100 -> Warn
+    else -> TextMain
+}
