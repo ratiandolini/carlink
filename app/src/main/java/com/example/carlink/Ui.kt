@@ -271,6 +271,55 @@ private fun Dashboard(vm: CarViewModel, withBluetooth: (() -> Unit) -> Unit) {
             }
         }
 
+        // მგზავრობები
+        Card {
+            Text("გზაზე ჩაწერა", color = Muted, fontSize = 13.sp)
+            Spacer4()
+            if (ui.tripActive) {
+                Text("● იწერება მგზავრობა…", color = Good, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                Spacer4()
+            }
+            val last = ui.trips.lastOrNull()
+            if (last == null) {
+                Text(
+                    "დააკავშირე ადაპტერი და იარე. სიჩქარის დაწყებისას ჩაწერა თავისით დაიწყება, გაჩერებისას შეჯამებას აქ ნახავ. ეკრანს ტარებისას არ უყურო.",
+                    color = Muted, fontSize = 13.sp,
+                )
+            } else {
+                val fmt = SimpleDateFormat("d MMM HH:mm", Locale.getDefault())
+                Text("ბოლო მგზავრობა · ${fmt.format(Date(last.start))} · ${last.moveSec / 60} წთ", color = TextMain, fontSize = 14.sp)
+                Spacer4()
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                    MiniStat("მაქს. ბუსტი", if (last.maxMap > 0) "+${last.maxBoost} kPa" else "—", Modifier.weight(1f))
+                    MiniStat("მაქს. MAP", if (last.maxMap > 0) "${last.maxMap} kPa" else "—", Modifier.weight(1f))
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth().padding(top = 10.dp)) {
+                    MiniStat("კორექცია (საშ.)", "%+.1f%%".format(last.avgTrim), Modifier.weight(1f))
+                    MiniStat("მაქს. დატვირთვა", "${last.maxLoad}%", Modifier.weight(1f))
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth().padding(top = 10.dp)) {
+                    MiniStat("მაქს. სიჩქარე", "${last.maxSpeed} კმ/სთ", Modifier.weight(1f))
+                    MiniStat("მაქს. ბრუნი", "${last.maxRpm}", Modifier.weight(1f))
+                }
+                Spacer4()
+                last.hints().forEach {
+                    Text(it, color = TextMain, fontSize = 13.sp)
+                    Spacer4()
+                }
+                Text("ინფორმაციისთვისაა და დიაგნოზი არ არის. მექანიკოსს აჩვენე.", color = Muted, fontSize = 12.sp)
+                if (ui.trips.size > 1) {
+                    Spacer4()
+                    Text("წინა მგზავრობები", color = Muted, fontSize = 12.sp)
+                    ui.trips.dropLast(1).takeLast(5).reversed().forEach { t ->
+                        Text(
+                            "${fmt.format(Date(t.start))} · ბუსტი ${if (t.maxMap > 0) "+${t.maxBoost}" else "—"} kPa · კორექცია %+.1f%%".format(t.avgTrim),
+                            color = TextMain, fontSize = 12.sp,
+                        )
+                    }
+                }
+            }
+        }
+
         // ბორბლები (ჯერ არ არის რეალიზებული)
         Card {
             Text("ბორბლების წნევა", color = Muted, fontSize = 13.sp)

@@ -34,6 +34,8 @@ data class UiState(
     val clearResult: String? = null,
     val error: String? = null,
     val demo: Boolean = false,
+    val trips: List<TripSummary> = emptyList(),
+    val tripActive: Boolean = false,
 )
 
 data class ExplorerState(
@@ -47,6 +49,8 @@ class CarViewModel(app: Application) : AndroidViewModel(app) {
     private val prefs = app.getSharedPreferences("carlink", Context.MODE_PRIVATE)
     private val history = HistoryStore(File(app.filesDir, "history.csv"))
     private val dtcLog = DtcLog(File(app.filesDir, "dtc_log.txt"))
+    private val tripStore = TripStore(File(app.filesDir, "trips.csv"))
+    private val recorder = TripRecorder()
     private val _state = MutableStateFlow(
         UiState(lastSaved = loadSaved(), deviceName = prefs.getString("dev_name", null))
     )
@@ -72,7 +76,8 @@ class CarViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val h = withContext(Dispatchers.IO) { history.load() }
             val l = withContext(Dispatchers.IO) { dtcLog.load() }
-            _state.update { it.copy(history = h, dtcLog = l) }
+            val t = withContext(Dispatchers.IO) { tripStore.load() }
+            _state.update { it.copy(history = h, dtcLog = l, trips = t) }
         }
     }
 
@@ -120,8 +125,10 @@ class CarViewModel(app: Application) : AndroidViewModel(app) {
                         save(snap)
                         checkAlerts(snap)
                         maybeLogHistory(snap)
+                        recorder.update(snap)?.let { saveTrip(it) }
+                        _state.update { it.copy(tripActive = recorder.active) }
                     }
-                    delay(2000)
+                    delay(1000)
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -139,6 +146,8 @@ class CarViewModel(app: Application) : AndroidViewModel(app) {
                     )
                 }
             } finally {
+                recorder.finish()?.let { saveTrip(it) }
+                _state.update { it.copy(tripActive = false) }
                 source = null
                 src?.close()
             }
@@ -487,6 +496,15 @@ class CarViewModel(app: Application) : AndroidViewModel(app) {
             } catch (e: Exception) {
                 _state.update { it.copy(clearResult = "⚠ ${e.message ?: "წაშლა ვერ მოხერხდა"}") }
             }
+        }
+    }
+
+    private fun saveTrip(t: TripSummary) {
+        try {
+            tripStore.append(t)
+            val all = tripStore.load()
+            _state.update { it.copy(trips = all) }
+        } catch (e: Exception) {
         }
     }
 
