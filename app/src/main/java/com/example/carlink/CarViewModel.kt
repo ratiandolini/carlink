@@ -246,6 +246,7 @@ class CarViewModel(app: Application) : AndroidViewModel(app) {
             wasConnected = true
             _state.update { it.copy(connection = Conn.Connected) }
             while (true) {
+                (active as? Elm327Source)?.probeIntervalMs = if (_state.value.watching) 150_000L else 15_000L
                 val snap = ioMutex.withLock { active.read() }
                 _state.update { it.copy(snapshot = snap) }
                 if (!demo) {

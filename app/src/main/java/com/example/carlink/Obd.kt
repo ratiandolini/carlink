@@ -111,6 +111,12 @@ class Elm327Source(private val device: BluetoothDevice) : ObdSource {
     private var lastPermanent: List<String> = emptyList()
     private var lastExtra: ExtraData? = null
 
+    /** ანთების გარეშე ECU-ს ამ ინტერვალით ვამოწმებთ (ბუსზე ტრაფიკი კი არ ვაჩვენოთ და დენი ნაკლები დაიხარჯოს). */
+    @Volatile
+    var probeIntervalMs: Long = 15_000L
+    private var asleep = false
+    private var lastProbe = 0L
+
     @SuppressLint("MissingPermission")
     override suspend fun connect() {
         withContext(Dispatchers.IO) {
@@ -224,10 +230,20 @@ class Elm327Source(private val device: BluetoothDevice) : ObdSource {
 
     override suspend fun read(): CarSnapshot = withContext(Dispatchers.IO) {
         val volt = readVoltage()
+        val now = System.currentTimeMillis()
+        // ECU ძინავს: ბუსს ხშირად აღარ ვეკითხებით. ძაბვა > 13 V = ძრავი ჩაირთო, მაშინვე ვამოწმებთ
+        if (asleep && now - lastProbe < probeIntervalMs && (volt ?: 0f) < 13.0f) {
+            return@withContext CarSnapshot(
+                batteryV = volt, ecuAlive = false,
+                dtcs = lastDtcs, pendingDtcs = lastPending, permanentDtcs = lastPermanent, extra = lastExtra,
+            )
+        }
+        lastProbe = now
         // ჯერ ვამოწმებთ, პასუხობს თუ არა ძრავის კომპიუტერი (ანთება გამორთულია = არ პასუხობს)
         val rpm = pid("010C")?.takeIf { it.size >= 2 }?.let { (it[0] * 256 + it[1]) / 4 }
         val coolant = pidSmart("0105")?.firstOrNull()?.let { it - 40 }
-        if (rpm == null && coolant == null) {
+        asleep = rpm == null && coolant == null
+        if (asleep) {
             misses.clear()
             return@withContext CarSnapshot(
                 batteryV = volt,
