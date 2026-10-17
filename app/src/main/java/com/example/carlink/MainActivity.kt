@@ -9,11 +9,10 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.activity.viewModels
 import androidx.core.content.ContextCompat
 
 class MainActivity : ComponentActivity() {
-    private val vm: CarViewModel by viewModels()
+    private val vm: CarViewModel get() = (application as CarLinkApplication).vm
     private var pending: (() -> Unit)? = null
 
     private val permLauncher =
@@ -54,6 +53,7 @@ class MainActivity : ComponentActivity() {
         // ეკრანი არ ჩაქრეს, სანამ მანქანასთან ვმუშაობთ
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         askNotifications()
+        if (vm.state.value.watching) withBluetooth { vm.setWatching(true) }
         setContent {
             CarLinkTheme {
                 CarLinkApp(vm = vm, withBluetooth = ::withBluetooth)

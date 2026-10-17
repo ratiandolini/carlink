@@ -4,6 +4,8 @@ import android.annotation.SuppressLint
 import android.app.Application
 import android.bluetooth.BluetoothManager
 import android.content.Context
+import android.content.Intent
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CancellationException
@@ -36,6 +38,11 @@ data class UiState(
     val demo: Boolean = false,
     val trips: List<TripSummary> = emptyList(),
     val tripActive: Boolean = false,
+    val profile: VehicleProfile = VehicleProfile(),
+    val watching: Boolean = false,
+    val live: List<LivePoint> = emptyList(),
+    val freeze: List<String>? = null,
+    val maint: List<MaintItem> = emptyList(),
 )
 
 data class ExplorerState(
@@ -52,7 +59,13 @@ class CarViewModel(app: Application) : AndroidViewModel(app) {
     private val tripStore = TripStore(File(app.filesDir, "trips.csv"))
     private val recorder = TripRecorder()
     private val _state = MutableStateFlow(
-        UiState(lastSaved = loadSaved(), deviceName = prefs.getString("dev_name", null))
+        UiState(
+            lastSaved = loadSaved(),
+            deviceName = prefs.getString("dev_name", null),
+            profile = loadProfile(),
+            watching = prefs.getBoolean("watching", false),
+            maint = loadMaint(),
+        )
     )
     val state: StateFlow<UiState> = _state.asStateFlow()
 
@@ -78,7 +91,105 @@ class CarViewModel(app: Application) : AndroidViewModel(app) {
             val l = withContext(Dispatchers.IO) { dtcLog.load() }
             val t = withContext(Dispatchers.IO) { tripStore.load() }
             _state.update { it.copy(history = h, dtcLog = l, trips = t) }
+            checkMaint()
         }
+    }
+
+    // ---------- პროფილი და შეხსენებები ----------
+
+    private fun loadProfile(): VehicleProfile {
+        val d = VehicleProfile()
+        return VehicleProfile(
+            name = prefs.getString("p_name", null) ?: d.name,
+            tankL = prefs.getFloat("p_tank", d.tankL),
+            fuelAlertPct = prefs.getInt("p_fuel", d.fuelAlertPct),
+            batteryAlertV = prefs.getFloat("p_batt", d.batteryAlertV),
+            coolantAlertC = prefs.getInt("p_cool", d.coolantAlertC),
+        )
+    }
+
+    fun saveProfile(p: VehicleProfile) {
+        prefs.edit()
+            .putString("p_name", p.name)
+            .putFloat("p_tank", p.tankL)
+            .putInt("p_fuel", p.fuelAlertPct)
+            .putFloat("p_batt", p.batteryAlertV)
+            .putInt("p_cool", p.coolantAlertC)
+            .apply()
+        _state.update { it.copy(profile = p) }
+    }
+
+    private fun loadMaint(): List<MaintItem> =
+        prefs.getString("maint", "").orEmpty().lines().mapNotNull { line ->
+            val p = line.split("|")
+            if (p.size < 3) return@mapNotNull null
+            val t = p[1].toLongOrNull() ?: return@mapNotNull null
+            val d = p[2].toIntOrNull() ?: return@mapNotNull null
+            MaintItem(p[0], t, d)
+        }
+
+    private fun storeMaint(list: List<MaintItem>) {
+        prefs.edit().putString("maint", list.joinToString("\n") { "${it.name.replace("|", " ")}|${it.lastDone}|${it.intervalDays}" }).apply()
+        _state.update { it.copy(maint = list) }
+    }
+
+    fun addMaint(name: String, days: Int) {
+        val n = name.trim()
+        if (n.isEmpty() || days <= 0) return
+        storeMaint(_state.value.maint + MaintItem(n, System.currentTimeMillis(), days))
+    }
+
+    fun doneMaint(index: Int) {
+        val l = _state.value.maint.toMutableList()
+        if (index !in l.indices) return
+        l[index] = l[index].copy(lastDone = System.currentTimeMillis())
+        storeMaint(l)
+    }
+
+    fun removeMaint(index: Int) {
+        val l = _state.value.maint.toMutableList()
+        if (index !in l.indices) return
+        l.removeAt(index)
+        storeMaint(l)
+    }
+
+    private fun checkMaint() {
+        val ctx = getApplication<Application>()
+        _state.value.maint.forEachIndexed { i, m ->
+            if (m.daysLeft() < 0) {
+                Notifier.notify(ctx, 20 + i, "დროა: ${m.name}", "ვადა ${-m.daysLeft()} დღით გადაცდა")
+            }
+        }
+    }
+
+    // ---------- ფონური მონიტორინგი ----------
+
+    /** ღილაკიდან: ჩართვა/გამორთვა. ჩართვისას ფონური სერვისი იწყება და ადაპტერს თავისით ეძებს. */
+    fun setWatching(on: Boolean) {
+        prefs.edit().putBoolean("watching", on).apply()
+        _state.update { it.copy(watching = on) }
+        val ctx = getApplication<Application>()
+        val i = Intent(ctx, MonitorService::class.java)
+        if (on) {
+            try {
+                ContextCompat.startForegroundService(ctx, i)
+            } catch (e: Exception) {
+                _state.update { it.copy(error = "ფონური სერვისი ვერ ჩაირთო: ${e.message}") }
+            }
+            startWatchConnection()
+        } else {
+            ctx.stopService(i)
+        }
+    }
+
+    /** სერვისიდან (სისტემამ თავიდან გაუშვა): სერვისს ხელახლა არ ვიწყებთ. */
+    fun resumeWatching() {
+        _state.update { it.copy(watching = true) }
+        startWatchConnection()
+    }
+
+    private fun startWatchConnection() {
+        if (job?.isActive != true) connect(false)
     }
 
     @SuppressLint("MissingPermission")
@@ -102,59 +213,132 @@ class CarViewModel(app: Application) : AndroidViewModel(app) {
         job?.cancel()
         exJob?.cancel()
         job = viewModelScope.launch {
-            var src: ObdSource? = null
-            try {
-                _state.update { it.copy(connection = Conn.Connecting, error = null, demo = demo) }
-                src = if (demo) {
-                    DemoSource()
-                } else {
-                    val addr = prefs.getString("dev_addr", null)
-                        ?: throw IllegalStateException("ჯერ აირჩიე ადაპტერი")
-                    val bm = getApplication<Application>().getSystemService(BluetoothManager::class.java)
-                    val adapter = bm?.adapter ?: throw IllegalStateException("Bluetooth არ არის ხელმისაწვდომი")
-                    Elm327Source(adapter.getRemoteDevice(addr))
+            var fails = 0
+            do {
+                val ok = connectOnce(demo)
+                if (!demo && _state.value.watching) {
+                    fails = if (ok) 0 else fails + 1
+                    delay(minOf(30_000L + fails * 15_000L, 180_000L))
                 }
-                src.connect()
-                val active: ObdSource = src
-                source = active
-                _state.update { it.copy(connection = Conn.Connected) }
-                while (isActive) {
-                    val snap = ioMutex.withLock { active.read() }
-                    _state.update { it.copy(snapshot = snap) }
-                    if (!demo) {
-                        save(snap)
-                        checkAlerts(snap)
+            } while (!demo && _state.value.watching)
+        }
+    }
+
+    /** ერთი კავშირის სესია. true = კავშირი დამყარდა (და მერე გაწყდა), false = ვერ დამყარდა. */
+    @SuppressLint("MissingPermission")
+    private suspend fun connectOnce(demo: Boolean): Boolean {
+        var src: ObdSource? = null
+        var wasConnected = false
+        try {
+            _state.update { it.copy(connection = Conn.Connecting, error = null, demo = demo) }
+            src = if (demo) {
+                DemoSource()
+            } else {
+                val addr = prefs.getString("dev_addr", null)
+                    ?: throw IllegalStateException("ჯერ აირჩიე ადაპტერი")
+                val bm = getApplication<Application>().getSystemService(BluetoothManager::class.java)
+                val adapter = bm?.adapter ?: throw IllegalStateException("Bluetooth არ არის ხელმისაწვდომი")
+                Elm327Source(adapter.getRemoteDevice(addr))
+            }
+            src.connect()
+            val active: ObdSource = src
+            source = active
+            wasConnected = true
+            _state.update { it.copy(connection = Conn.Connected) }
+            while (true) {
+                val snap = ioMutex.withLock { active.read() }
+                _state.update { it.copy(snapshot = snap) }
+                if (!demo) {
+                    save(snap)
+                    checkAlerts(snap)
+                    if (snap.ecuAlive) {
                         maybeLogHistory(snap)
                         recorder.update(snap)?.let { saveTrip(it) }
-                        _state.update { it.copy(tripActive = recorder.active) }
+                    } else {
+                        recorder.finish()?.let { saveTrip(it) }
                     }
-                    delay(1000)
+                    _state.update { it.copy(lastSaved = loadSaved(), tripActive = recorder.active) }
                 }
+                pushLive(snap)
+                delay(if (snap.ecuAlive) 1000L else if (_state.value.watching) 20_000L else 4_000L)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            val msg = e.message.orEmpty()
+            val friendly = if (e is IllegalStateException && msg.isNotBlank()) {
+                msg
+            } else {
+                "ადაპტერთან კავშირი ვერ დამყარდა.\nშეამოწმე: ანთება ჩართულია, ELM327-ის ინდიკატორი ანთია, ტელეფონში დაწყვილებულია და სხვა აპი მასთან არ არის დაკავშირებული."
+            }
+            _state.update {
+                it.copy(
+                    connection = Conn.Failed,
+                    error = if (msg.isBlank() || friendly == msg) friendly else "$friendly\n\n[$msg]",
+                )
+            }
+        } finally {
+            recorder.finish()?.let { saveTrip(it) }
+            _state.update { it.copy(tripActive = false) }
+            source = null
+            src?.close()
+        }
+        return wasConnected
+    }
+
+    private fun pushLive(s: CarSnapshot) {
+        if (!s.ecuAlive) return
+        val m = s.mapKpa
+        val b = s.baroKpa
+        val st = s.stftPct
+        val lt = s.ltftPct
+        val p = LivePoint(
+            boost = if (m != null && b != null) (m - b).toFloat() else null,
+            trim = if (st != null && lt != null) st + lt else null,
+            rpm = s.rpm,
+            speed = s.speedKmh,
+            lph = fuelLph(s),
+        )
+        _state.update { it.copy(live = (it.live + p).takeLast(120)) }
+    }
+
+    /** Mode 02 გაყინული კადრი (მხოლოდ წაკითხვა). */
+    fun readFreezeFrame() {
+        val src = source ?: return
+        viewModelScope.launch {
+            try {
+                val r = ioMutex.withLock { src.freezeFrame() }
+                _state.update { it.copy(freeze = r) }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                val msg = e.message.orEmpty()
-                val friendly = if (e is IllegalStateException && msg.isNotBlank()) {
-                    msg
-                } else {
-                    "ადაპტერთან კავშირი ვერ დამყარდა.\nშეამოწმე: ანთება ჩართულია, ELM327-ის ინდიკატორი ანთია, ტელეფონში დაწყვილებულია და სხვა აპი მასთან არ არის დაკავშირებული."
-                }
-                _state.update {
-                    it.copy(
-                        connection = Conn.Failed,
-                        error = if (msg.isBlank() || friendly == msg) friendly else "$friendly\n\n[$msg]",
-                    )
-                }
-            } finally {
-                recorder.finish()?.let { saveTrip(it) }
-                _state.update { it.copy(tripActive = false) }
-                source = null
-                src?.close()
+                _state.update { it.copy(freeze = listOf("⚠ ${e.message ?: "ვერ წავიკითხე"}")) }
             }
         }
     }
 
+    fun dismissFreeze() {
+        _state.update { it.copy(freeze = null) }
+    }
+
+    /** მონაცემების ტექსტი გასაზიარებლად (ისტორია, მგზავრობები, კოდების ჟურნალი). */
+    fun exportText(): String {
+        val dir = getApplication<Application>().filesDir
+        fun tail(name: String, n: Int): String =
+            File(dir, name).takeIf { it.exists() }?.readLines()?.takeLast(n)?.joinToString("\n").orEmpty()
+        return buildString {
+            append("CarLink მონაცემები · ${_state.value.profile.name}\n\n")
+            append("## მგზავრობები (დასაწყისი,დასასრული,მოძრ.წმ,მაქს.სიჩქარე,მაქს.ბრუნი,მაქს.MAP,ბარო,მაქს.დატვირთვა,საშ.კორექცია,მაქს.კორექცია,ღარიბი%,კმ,ლიტრი)\n")
+            append(tail("trips.csv", 100)).append("\n\n")
+            append("## კოდების ჟურნალი (დრო|ტექსტი)\n")
+            append(tail("dtc_log.txt", 100)).append("\n\n")
+            append("## ისტორია (დრო,ბენზინი%,ტემპ,ძაბვა)\n")
+            append(tail("history.csv", 500))
+        }.takeLast(100_000)
+    }
+
     fun disconnect() {
+        if (_state.value.watching) setWatching(false)
         exJob?.cancel()
         job?.cancel()
         _state.update { it.copy(connection = Conn.Idle, snapshot = null, lastSaved = loadSaved()) }
@@ -425,24 +609,26 @@ class CarViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun checkAlerts(s: CarSnapshot) {
         val ctx = getApplication<Application>()
+        val p = _state.value.profile
         s.fuelPercent?.let {
-            if (it < 15f && !fuelAlert) {
+            if (it < p.fuelAlertPct && !fuelAlert) {
                 fuelAlert = true
                 Notifier.notify(ctx, 1, "ბენზინი დაბალია", "დარჩენილია დაახლოებით ${it.roundToInt()}%")
-            } else if (it > 20f) fuelAlert = false
+            } else if (it > p.fuelAlertPct + 5) fuelAlert = false
         }
         s.batteryV?.let {
-            if (it < 11.8f && !batteryAlert) {
+            if (it < p.batteryAlertV && !batteryAlert) {
                 batteryAlert = true
                 Notifier.notify(ctx, 2, "აკუმულატორის ძაბვა დაბალია", "%.1f V".format(it))
-            } else if (it > 12.2f) batteryAlert = false
+            } else if (it > p.batteryAlertV + 0.4f) batteryAlert = false
         }
         s.coolantC?.let {
-            if (it > 105 && !coolantAlert) {
+            if (it > p.coolantAlertC && !coolantAlert) {
                 coolantAlert = true
                 Notifier.notify(ctx, 3, "ძრავი გადახურდა", "გამაგრილებელი: $it °C")
-            } else if (it < 100) coolantAlert = false
+            } else if (it < p.coolantAlertC - 5) coolantAlert = false
         }
+        if (!s.ecuAlive) return
         val now = s.dtcs.toSet()
         val fresh = now - knownDtcs
         if (fresh.isNotEmpty()) {
@@ -521,10 +707,12 @@ class CarViewModel(app: Application) : AndroidViewModel(app) {
     private fun save(s: CarSnapshot) {
         val e = prefs.edit()
         e.putLong("t", s.timeMillis)
-        e.putString("fuel", s.fuelPercent?.toString())
-        e.putString("coolant", s.coolantC?.toString())
-        e.putString("battery", s.batteryV?.toString())
-        e.putString("dtcs", s.dtcs.joinToString(","))
+        s.batteryV?.let { e.putString("battery", it.toString()) }
+        if (s.ecuAlive) {
+            e.putString("fuel", s.fuelPercent?.toString())
+            e.putString("coolant", s.coolantC?.toString())
+            e.putString("dtcs", s.dtcs.joinToString(","))
+        }
         e.apply()
     }
 

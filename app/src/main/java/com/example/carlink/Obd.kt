@@ -28,7 +28,33 @@ data class CarSnapshot(
     val ltftPct: Float? = null,
     val dtcs: List<String> = emptyList(),
     val pendingDtcs: List<String> = emptyList(),
+    val permanentDtcs: List<String> = emptyList(),
+    /** false = ადაპტერი ჩანს, მაგრამ ძრავის კომპიუტერი არ პასუხობს (ანთება გამორთულია). */
+    val ecuAlive: Boolean = true,
+    val extra: ExtraData? = null,
     val timeMillis: Long = System.currentTimeMillis(),
+)
+
+/** იშვიათად ცვალებადი დამატებითი მონაცემები (ყოველ ~წუთში ერთხელ ახლდება). */
+data class ExtraData(
+    val timingAdv: Float? = null,
+    val fuelPressKpa: Int? = null,
+    val o2B1S1V: Float? = null,
+    val o2B1S2V: Float? = null,
+    val runTimeSec: Int? = null,
+    val distMilKm: Int? = null,
+    val distClearedKm: Int? = null,
+    val warmups: Int? = null,
+    val ecuVoltage: Float? = null,
+    val lambda: Float? = null,
+    val ambientC: Int? = null,
+    val oilC: Int? = null,
+    val fuelRateLph: Float? = null,
+    val catTempC: Float? = null,
+    val absLoadPct: Float? = null,
+    val milOn: Boolean? = null,
+    val dtcCount: Int? = null,
+    val readiness: List<Pair<String, Boolean>> = emptyList(),
 )
 
 interface ObdSource {
@@ -40,6 +66,9 @@ interface ObdSource {
     suspend fun supportedPids(): List<String>
     suspend fun vin(): String?
     suspend fun adapterInfo(): String
+
+    /** Mode 02: გაყინული კადრი (პირობები, როცა შეცდომა დაფიქსირდა). მხოლოდ წაკითხვა. */
+    suspend fun freezeFrame(): List<String>
 
     /** Mode 04: ძრავის (OBD-II) კოდების და Check Engine ნათურის წაშლა. */
     suspend fun clearDtcs(): String
@@ -79,6 +108,8 @@ class Elm327Source(private val device: BluetoothDevice) : ObdSource {
     private var tick = 0
     private var lastDtcs: List<String> = emptyList()
     private var lastPending: List<String> = emptyList()
+    private var lastPermanent: List<String> = emptyList()
+    private var lastExtra: ExtraData? = null
 
     @SuppressLint("MissingPermission")
     override suspend fun connect() {
@@ -180,6 +211,7 @@ class Elm327Source(private val device: BluetoothDevice) : ObdSource {
         val r = send("04", 6000)
         lastDtcs = emptyList()
         lastPending = emptyList()
+        lastPermanent = emptyList()
         tick = 0 // შემდეგ ციკლზე კოდები თავიდან წაიკითხება
         r
     }
@@ -191,9 +223,23 @@ class Elm327Source(private val device: BluetoothDevice) : ObdSource {
     }
 
     override suspend fun read(): CarSnapshot = withContext(Dispatchers.IO) {
-        val fuel = pidSmart("012F")?.firstOrNull()?.let { it * 100f / 255f }
+        val volt = readVoltage()
+        // ჯერ ვამოწმებთ, პასუხობს თუ არა ძრავის კომპიუტერი (ანთება გამორთულია = არ პასუხობს)
+        val rpm = pid("010C")?.takeIf { it.size >= 2 }?.let { (it[0] * 256 + it[1]) / 4 }
         val coolant = pidSmart("0105")?.firstOrNull()?.let { it - 40 }
-        val rpm = pidSmart("010C")?.takeIf { it.size >= 2 }?.let { (it[0] * 256 + it[1]) / 4 }
+        if (rpm == null && coolant == null) {
+            misses.clear()
+            return@withContext CarSnapshot(
+                batteryV = volt,
+                ecuAlive = false,
+                dtcs = lastDtcs,
+                pendingDtcs = lastPending,
+                permanentDtcs = lastPermanent,
+                extra = lastExtra,
+            )
+        }
+        val slow = tick % 15 == 0
+        val fuel = pidSmart("012F")?.firstOrNull()?.let { it * 100f / 255f }
         val speed = pidSmart("010D")?.firstOrNull()
         val map = pidSmart("010B")?.firstOrNull()
         val baro = pidSmart("0133")?.firstOrNull()
@@ -203,12 +249,14 @@ class Elm327Source(private val device: BluetoothDevice) : ObdSource {
         val thr = pidSmart("0111")?.firstOrNull()?.let { it * 100f / 255f }
         val stft = pidSmart("0106")?.firstOrNull()?.let { (it - 128) * 100f / 128f }
         val ltft = pidSmart("0107")?.firstOrNull()?.let { (it - 128) * 100f / 128f }
-        val volt = readVoltage()
-        // შეცდომის კოდებს ყოველ ~30 წამში ვკითხულობთ, ყოველ ციკლზე საჭირო არაა
-        if (tick++ % 15 == 0) {
+        // შეცდომის კოდებს და დამატებით მონაცემებს ყოველ ~წუთში ვკითხულობთ, ყოველ ციკლზე საჭირო არაა
+        if (slow) {
             lastDtcs = readDtcs("03")
             lastPending = readDtcs("07")
+            lastPermanent = readDtcs("0A")
+            lastExtra = readExtras()
         }
+        tick++
         CarSnapshot(
             fuelPercent = fuel,
             coolantC = coolant,
@@ -225,7 +273,84 @@ class Elm327Source(private val device: BluetoothDevice) : ObdSource {
             ltftPct = ltft,
             dtcs = lastDtcs,
             pendingDtcs = lastPending,
+            permanentDtcs = lastPermanent,
+            extra = lastExtra,
         )
+    }
+
+    private fun u16(d: List<Int>?): Int? = d?.takeIf { it.size >= 2 }?.let { it[0] * 256 + it[1] }
+
+    private fun readExtras(): ExtraData {
+        val st = pidSmart("0101")
+        var mil: Boolean? = null
+        var count: Int? = null
+        val ready = mutableListOf<Pair<String, Boolean>>()
+        if (st != null && st.size >= 4) {
+            val a = st[0]; val b = st[1]; val c = st[2]; val d = st[3]
+            mil = (a and 0x80) != 0
+            count = a and 0x7F
+            if ((b and 0x01) != 0) ready += "ცილინდრების გამოტოვება (misfire)" to ((b and 0x10) == 0)
+            if ((b and 0x02) != 0) ready += "საწვავის სისტემა" to ((b and 0x20) == 0)
+            if ((b and 0x04) != 0) ready += "კომპონენტები" to ((b and 0x40) == 0)
+            val names = listOf(
+                "კატალიზატორი", "კატალიზატორის გათბობა", "ორთქლის სისტემა (EVAP)", "მეორადი ჰაერი",
+                "კონდიციონერი", "ჟანგბადის სენსორი", "ჟანგბადის სენსორის გამათბობელი", "EGR",
+            )
+            for (i in 0..7) {
+                if (((c shr i) and 1) != 0) ready += names[i] to (((d shr i) and 1) == 0)
+            }
+        }
+        return ExtraData(
+            timingAdv = pidSmart("010E")?.firstOrNull()?.let { it / 2f - 64f },
+            fuelPressKpa = pidSmart("010A")?.firstOrNull()?.let { it * 3 },
+            o2B1S1V = pidSmart("0114")?.firstOrNull()?.let { it / 200f },
+            o2B1S2V = pidSmart("0115")?.firstOrNull()?.let { it / 200f },
+            runTimeSec = u16(pidSmart("011F")),
+            distMilKm = u16(pidSmart("0121")),
+            distClearedKm = u16(pidSmart("0131")),
+            warmups = pidSmart("0130")?.firstOrNull(),
+            ecuVoltage = u16(pidSmart("0142"))?.let { it / 1000f },
+            lambda = u16(pidSmart("0144"))?.let { it * 2f / 65536f },
+            ambientC = pidSmart("0146")?.firstOrNull()?.let { it - 40 },
+            oilC = pidSmart("015C")?.firstOrNull()?.let { it - 40 },
+            fuelRateLph = u16(pidSmart("015E"))?.let { it / 20f },
+            catTempC = u16(pidSmart("013C"))?.let { it / 10f - 40f },
+            absLoadPct = u16(pidSmart("0143"))?.let { it * 100f / 255f },
+            milOn = mil,
+            dtcCount = count,
+            readiness = ready,
+        )
+    }
+
+    /** Mode 02 პასუხიდან მონაცემის ბაიტები: "42 <PID> 00 <data>". */
+    private fun freezeBytes(pidHex: String): List<Int>? {
+        val resp = send("02${pidHex}00", 3000).uppercase()
+        if (resp.contains("NO DATA") || resp.contains("UNABLE") || resp.contains("?")) return null
+        val hex = resp.replace(Regex("[^0-9A-F]"), "")
+        val h = "42${pidHex}00"
+        val i = hex.indexOf(h)
+        if (i < 0) return null
+        return hex.substring(i + h.length).chunked(2).filter { it.length == 2 }.map { it.toInt(16) }
+            .takeIf { it.isNotEmpty() }
+    }
+
+    override suspend fun freezeFrame(): List<String> = withContext(Dispatchers.IO) {
+        val out = mutableListOf<String>()
+        val dtc = freezeBytes("02")
+        if (dtc == null || dtc.size < 2 || (dtc[0] == 0 && dtc[1] == 0)) {
+            return@withContext listOf("გაყინული კადრი არ არის (კოდი ჯერ არ დაფიქსირებულა ან წაშლილია)")
+        }
+        out += "კოდი, რომელმაც კადრი გააყინა: " + decodeDtc("%02X%02X".format(dtc[0], dtc[1]))
+        freezeBytes("04")?.firstOrNull()?.let { out += "დატვირთვა: %.0f%%".format(it * 100f / 255f) }
+        freezeBytes("05")?.firstOrNull()?.let { out += "გამაგრილებელი: ${it - 40} °C" }
+        freezeBytes("06")?.firstOrNull()?.let { out += "მოკლე კორექცია: %+.1f%%".format((it - 128) * 100f / 128f) }
+        freezeBytes("07")?.firstOrNull()?.let { out += "გრძელი კორექცია: %+.1f%%".format((it - 128) * 100f / 128f) }
+        freezeBytes("0B")?.firstOrNull()?.let { out += "MAP: $it kPa" }
+        freezeBytes("0C")?.takeIf { it.size >= 2 }?.let { out += "ბრუნი: ${(it[0] * 256 + it[1]) / 4}" }
+        freezeBytes("0D")?.firstOrNull()?.let { out += "სიჩქარე: $it კმ/სთ" }
+        freezeBytes("0F")?.firstOrNull()?.let { out += "ჰაერის ტემპ.: ${it - 40} °C" }
+        freezeBytes("11")?.firstOrNull()?.let { out += "დროსელი: %.0f%%".format(it * 100f / 255f) }
+        out
     }
 
     override suspend fun raw(header: String?, cmd: String, timeoutMs: Long): String =
@@ -384,6 +509,13 @@ class DemoSource : ObdSource {
             ltftPct = 9.4f,
             dtcs = listOf("P0420", "P0171"),
             pendingDtcs = listOf("P0446"),
+            permanentDtcs = listOf("P0420"),
+            extra = ExtraData(
+                timingAdv = 12.5f, fuelPressKpa = 380, o2B1S1V = 0.45f, o2B1S2V = 0.62f,
+                runTimeSec = 840, distMilKm = 120, distClearedKm = 640, warmups = 12,
+                ecuVoltage = 14.0f, lambda = 1.0f, ambientC = 21, milOn = true, dtcCount = 5,
+                readiness = listOf("ცილინდრების გამოტოვება (misfire)" to true, "კატალიზატორი" to false, "ორთქლის სისტემა (EVAP)" to false),
+            ),
         )
     }
 
@@ -401,6 +533,12 @@ class DemoSource : ObdSource {
         delay(300)
         return "DEMO-VIN-NOT-REAL"
     }
+
+    override suspend fun freezeFrame(): List<String> = listOf(
+        "კოდი, რომელმაც კადრი გააყინა: P0171",
+        "დატვირთვა: 31%", "გამაგრილებელი: 90 °C", "მოკლე კორექცია: +6.2%",
+        "გრძელი კორექცია: +11.7%", "MAP: 38 kPa", "ბრუნი: 1840", "სიჩქარე: 52 კმ/სთ",
+    )
 
     override suspend fun adapterInfo(): String = "ATI → DEMO\nATDP → DEMO\nATRV → 12.6V"
 
@@ -458,23 +596,3 @@ fun decodeDtc(code: String): String {
     val d2 = (a and 0xF).toString(16).uppercase()
     return "$letter$d1$d2${code.substring(2).uppercase()}"
 }
-
-/** ხშირი კოდების მოკლე ახსნა (სრული სია არაა; უცნობი კოდი უბრალოდ ნაჩვენები იქნება). */
-val DTC_INFO: Map<String, String> = mapOf(
-    "P0420" to "კატალიზატორის ეფექტურობა დაბალია",
-    "P0236" to "ბუსტის (MAP) სენსორი: დიაპაზონი/მუშაობა",
-    "P0299" to "ტურბოს წნევა დაბალია (underboost)",
-    "P2227" to "ბარომეტრული წნევის სენსორი: დიაპაზონი/მუშაობა",
-    "P0446" to "საწვავის ორთქლის სისტემა: ვენტილაციის წრედი",
-    "P0501" to "სიჩქარის სენსორი: დიაპაზონი/მუშაობა",
-    "P0171" to "ნარევი ძალიან ღარიბია (ბანკი 1)",
-    "P0172" to "ნარევი ძალიან მდიდარია (ბანკი 1)",
-    "P0128" to "ძრავი ნელა თბება (თერმოსტატი?)",
-    "P0300" to "ცილინდრების შემთხვევითი გამოტოვება",
-    "P0301" to "პირველი ცილინდრი გამოტოვებს",
-    "P0302" to "მეორე ცილინდრი გამოტოვებს",
-    "P0303" to "მესამე ცილინდრი გამოტოვებს",
-    "P0304" to "მეოთხე ცილინდრი გამოტოვებს",
-    "P0442" to "საწვავის ორთქლის სისტემა: მცირე გაჟონვა",
-    "P0455" to "საწვავის ორთქლის სისტემა: დიდი გაჟონვა (ხშირად ბაკის თავსახური)",
-)

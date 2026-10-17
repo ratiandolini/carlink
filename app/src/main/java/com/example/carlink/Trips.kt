@@ -17,7 +17,11 @@ data class TripSummary(
     val avgTrim: Float,
     val maxTrim: Float,
     val leanPct: Int,
+    val distKm: Float = 0f,
+    val fuelL: Float = 0f,
 ) {
+    val per100: Float? get() = if (distKm >= 1f && fuelL > 0f) fuelL / distKm * 100f else null
+
     val maxBoost: Int get() = if (maxMap > 0 && baro > 0) maxMap - baro else 0
 
     /** მოკლე დასკვნები. მხოლოდ ინფორმაციისთვის, დიაგნოზი არ არის. */
@@ -41,12 +45,13 @@ data class TripSummary(
         } else {
             out += "საწვავის კორექცია ნორმის ფარგლებშია (საშუალოდ ${"%.1f".format(avgTrim)}%)."
         }
+        per100?.let { out += "საშუალო ხარჯი: %.1f ლ/100 კმ (მიახლოებითი, MAF-დან გამოთვლილი), მანძილი %.1f კმ.".format(it, distKm) }
         if (leanPct >= 30) out += "დროის ${leanPct}%-ში ნარევი ძალიან ღარიბი იყო (კორექცია > +15%)."
         return out
     }
 
     fun toLine(): String =
-        "$start,$end,$moveSec,$maxSpeed,$maxRpm,$maxMap,$baro,$maxLoad,$avgTrim,$maxTrim,$leanPct"
+        "$start,$end,$moveSec,$maxSpeed,$maxRpm,$maxMap,$baro,$maxLoad,$avgTrim,$maxTrim,$leanPct,$distKm,$fuelL"
 
     companion object {
         fun fromLine(line: String): TripSummary? {
@@ -56,6 +61,7 @@ data class TripSummary(
                 TripSummary(
                     p[0].toLong(), p[1].toLong(), p[2].toInt(), p[3].toInt(), p[4].toInt(),
                     p[5].toInt(), p[6].toInt(), p[7].toInt(), p[8].toFloat(), p[9].toFloat(), p[10].toInt(),
+                    p.getOrNull(11)?.toFloatOrNull() ?: 0f, p.getOrNull(12)?.toFloatOrNull() ?: 0f,
                 )
             } catch (e: Exception) {
                 null
@@ -98,11 +104,13 @@ class TripRecorder {
     private var trimN = 0
     private var maxTrim = -100f
     private var leanN = 0
+    private var distKm = 0f
+    private var fuelL = 0f
 
     private fun reset() {
         active = false; start = 0; lastT = 0; lastMovingT = 0; moveMs = 0
         maxSpeed = 0; maxRpm = 0; maxMap = 0; baro = 0; maxLoad = 0f
-        trimSum = 0.0; trimN = 0; maxTrim = -100f; leanN = 0
+        trimSum = 0.0; trimN = 0; maxTrim = -100f; leanN = 0; distKm = 0f; fuelL = 0f
     }
 
     /** აბრუნებს დასრულებულ მგზავრობას, თუ ის ახლა დასრულდა. */
@@ -122,6 +130,8 @@ class TripRecorder {
         if (moving) {
             lastMovingT = s.timeMillis
             moveMs += dt
+            distKm += (s.speedKmh ?: 0) * dt / 3_600_000f
+            fuelLph(s)?.let { fuelL += it * dt / 3_600_000f }
             maxSpeed = max(maxSpeed, s.speedKmh ?: 0)
             maxRpm = max(maxRpm, s.rpm ?: 0)
             s.mapKpa?.let { maxMap = max(maxMap, it) }
@@ -156,8 +166,18 @@ class TripRecorder {
             avgTrim = if (trimN > 0) (trimSum / trimN).toFloat() else 0f,
             maxTrim = if (trimN > 0) maxTrim else 0f,
             leanPct = if (trimN > 0) leanN * 100 / trimN else 0,
+            distKm = distKm,
+            fuelL = fuelL,
         )
         reset()
         return if (sum.moveSec >= 60) sum else null
     }
+}
+
+/** ბოლო მგზავრობების საშუალო ხარჯი ლ/100 კმ (დარჩენილი კილომეტრაჟის შესაფასებლად). */
+fun avgConsumption(trips: List<TripSummary>): Float? {
+    val good = trips.takeLast(5).filter { it.distKm >= 2f && it.fuelL > 0f }
+    val d = good.sumOf { it.distKm.toDouble() }
+    val f = good.sumOf { it.fuelL.toDouble() }
+    return if (d >= 2.0 && f > 0.0) (f / d * 100.0).toFloat() else null
 }

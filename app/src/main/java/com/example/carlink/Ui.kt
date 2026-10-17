@@ -80,10 +80,15 @@ fun CarLinkApp(vm: CarViewModel, withBluetooth: (() -> Unit) -> Unit) {
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             TabButton("დაფა", tab == 0) { tab = 0 }
-            TabButton("ექსპლორერი", tab == 1) { tab = 1 }
+            TabButton("მეტი", tab == 1) { tab = 1 }
+            TabButton("ექსპლორერი", tab == 2) { tab = 2 }
         }
         Box(Modifier.weight(1f)) {
-            if (tab == 0) Dashboard(vm, withBluetooth) else ExplorerScreen(vm)
+            when (tab) {
+                0 -> Dashboard(vm, withBluetooth)
+                1 -> MoreScreen(vm, withBluetooth)
+                else -> ExplorerScreen(vm)
+            }
         }
     }
 }
@@ -107,6 +112,8 @@ private fun Dashboard(vm: CarViewModel, withBluetooth: (() -> Unit) -> Unit) {
     var devices by remember { mutableStateOf(emptyList<Pair<String, String>>()) }
     val connected = ui.connection == Conn.Connected
     val snap = ui.snapshot
+    // ECU არ პასუხობს (ანთება გამორთულია) ან კავშირი არ არის: ვაჩვენებთ ბოლო შენახულ მნიშვნელობებს
+    val useSaved = !connected || snap?.ecuAlive == false
 
     Column(
         Modifier
@@ -117,7 +124,7 @@ private fun Dashboard(vm: CarViewModel, withBluetooth: (() -> Unit) -> Unit) {
     ) {
         // სათაური
         Column {
-            Text("Chevrolet Cruze 2017", color = TextMain, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+            Text(ui.profile.name, color = TextMain, fontSize = 24.sp, fontWeight = FontWeight.Bold)
             Spacer4()
             StatusRow(ui)
         }
@@ -150,7 +157,42 @@ private fun Dashboard(vm: CarViewModel, withBluetooth: (() -> Unit) -> Unit) {
         // ბენზინი
         Card {
             Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                FuelGauge(snap?.fuelPercent ?: if (!connected) ui.lastSaved?.fuelPercent else null)
+                FuelGauge(if (useSaved) ui.lastSaved?.fuelPercent else snap?.fuelPercent)
+            }
+            val fp = (if (useSaved) ui.lastSaved?.fuelPercent else snap?.fuelPercent)
+            if (fp != null) {
+                val liters = fp * ui.profile.tankL / 100f
+                val avg = avgConsumption(ui.trips)
+                Spacer4()
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                    MiniStat("ბაკში (დაახლ.)", "%.1f ლ".format(liters), Modifier.weight(1f))
+                    MiniStat(
+                        "დარჩენილი კმ (დაახლ.)",
+                        if (avg != null) "~%.0f კმ".format(liters / avg * 100f) else "—",
+                        Modifier.weight(1f),
+                    )
+                }
+                val now = if (!useSaved && snap != null) fuelPer100(snap) else null
+                Spacer4()
+                Text(
+                    when {
+                        now != null -> "ახლანდელი ხარჯი: %.1f ლ/100 კმ".format(now)
+                        avg != null -> "საშუალო ხარჯი ბოლო მგზავრობებით: %.1f ლ/100 კმ".format(avg)
+                        else -> "კმ-ის შეფასებისთვის ჯერ რამდენიმე კმ გაიარე ჩართული აპით"
+                    },
+                    color = Muted, fontSize = 12.sp,
+                )
+            }
+        }
+
+        if (connected && snap?.ecuAlive == false) {
+            Card {
+                Text("ანთება გამორთულია", color = Warn, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                Spacer4()
+                Text(
+                    "ადაპტერი ჩანს, მაგრამ ძრავის კომპიუტერი გათიშულია, ამიტომ ახლა მხოლოდ აკუმულატორის ძაბვა იკითხება. ბენზინი და დანარჩენი ბოლოს ნანახია. ანთების ჩართვისას მონაცემები თავისით განახლდება.",
+                    color = TextMain, fontSize = 13.sp,
+                )
             }
         }
 
@@ -158,14 +200,14 @@ private fun Dashboard(vm: CarViewModel, withBluetooth: (() -> Unit) -> Unit) {
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
             StatCard(
                 "აკუმულატორი",
-                (snap?.batteryV ?: if (!connected) ui.lastSaved?.batteryV else null)?.let { "%.1f V".format(it) } ?: "—",
+                (snap?.batteryV ?: if (useSaved) ui.lastSaved?.batteryV else null)?.let { "%.1f V".format(it) } ?: "—",
                 batteryColor(snap?.batteryV),
                 Modifier.weight(1f),
             )
             StatCard(
                 "ძრავის ტემპ.",
-                (snap?.coolantC ?: if (!connected) ui.lastSaved?.coolantC else null)?.let { "$it °C" } ?: "—",
-                coolantColor(snap?.coolantC),
+                (if (useSaved) ui.lastSaved?.coolantC else snap?.coolantC)?.let { "$it °C" } ?: "—",
+                coolantColor(if (useSaved) null else snap?.coolantC),
                 Modifier.weight(1f),
             )
         }
@@ -215,7 +257,8 @@ private fun Dashboard(vm: CarViewModel, withBluetooth: (() -> Unit) -> Unit) {
         }
 
         // შეცდომები
-        val dtcs = snap?.dtcs ?: if (!connected) ui.lastSaved?.dtcs.orEmpty() else emptyList()
+        val liveOk = connected && snap != null && snap.ecuAlive
+        val dtcs = if (liveOk) snap!!.dtcs else if (useSaved) ui.lastSaved?.dtcs.orEmpty() else emptyList()
         Card {
             Text("შეცდომის კოდები", color = Muted, fontSize = 13.sp)
             Spacer4()
@@ -228,22 +271,46 @@ private fun Dashboard(vm: CarViewModel, withBluetooth: (() -> Unit) -> Unit) {
             } else {
                 dtcs.forEach { code ->
                     Text(code, color = Warn, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
-                    Text(DTC_INFO[code] ?: "ახსნა ჩემს სიაში არ არის", color = Muted, fontSize = 13.sp)
+                    Text(dtcText(code), color = Muted, fontSize = 13.sp)
                     Spacer4()
                 }
             }
-            val pending = snap?.pendingDtcs.orEmpty().filter { it !in dtcs }
+            val pending = if (liveOk) snap!!.pendingDtcs.filter { it !in dtcs } else emptyList()
             if (pending.isNotEmpty()) {
                 Spacer4()
                 Text("მოლოდინში (ჯერ არ დადასტურებულა)", color = Muted, fontSize = 13.sp)
                 Spacer4()
                 pending.forEach { code ->
                     Text(code, color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                    Text(DTC_INFO[code] ?: "ახსნა ჩემს სიაში არ არის", color = Muted, fontSize = 13.sp)
+                    Text(dtcText(code), color = Muted, fontSize = 13.sp)
                     Spacer4()
                 }
             }
-            if (connected && (dtcs.isNotEmpty() || snap?.pendingDtcs?.isNotEmpty() == true)) {
+            val perm = if (liveOk) snap!!.permanentDtcs.filter { it !in dtcs && it !in pending } else emptyList()
+            if (perm.isNotEmpty()) {
+                Spacer4()
+                Text("მუდმივი (წაიშლება მხოლოდ გამოსწორების მერე)", color = Muted, fontSize = 13.sp)
+                Spacer4()
+                perm.forEach { code ->
+                    Text(code, color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    Text(dtcText(code), color = Muted, fontSize = 13.sp)
+                    Spacer4()
+                }
+            }
+            if (liveOk) {
+                Spacer4()
+                OutlinedButton(
+                    onClick = { vm.readFreezeFrame() },
+                    modifier = Modifier.fillMaxWidth(),
+                    contentPadding = BtnPad,
+                ) { BtnText("გაყინული კადრი (პირობები, როცა შეცდომა გაჩნდა)") }
+            }
+            ui.freeze?.let { lines ->
+                Spacer4()
+                lines.forEach { Text(it, color = TextMain, fontSize = 13.sp) }
+                TextButton(onClick = { vm.dismissFreeze() }) { Text("დახურვა") }
+            }
+            if (connected && (dtcs.isNotEmpty() || (liveOk && snap!!.pendingDtcs.isNotEmpty()))) {
                 Spacer4()
                 OutlinedButton(
                     onClick = { showClear = true },
@@ -300,6 +367,10 @@ private fun Dashboard(vm: CarViewModel, withBluetooth: (() -> Unit) -> Unit) {
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth().padding(top = 10.dp)) {
                     MiniStat("მაქს. სიჩქარე", "${last.maxSpeed} კმ/სთ", Modifier.weight(1f))
                     MiniStat("მაქს. ბრუნი", "${last.maxRpm}", Modifier.weight(1f))
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth().padding(top = 10.dp)) {
+                    MiniStat("მანძილი", "%.1f კმ".format(last.distKm), Modifier.weight(1f))
+                    MiniStat("ხარჯი", last.per100?.let { "%.1f ლ/100".format(it) } ?: "—", Modifier.weight(1f))
                 }
                 Spacer4()
                 last.hints().forEach {
@@ -442,7 +513,7 @@ private fun StatCard(label: String, value: String, color: Color, modifier: Modif
 }
 
 @Composable
-private fun MiniStat(label: String, value: String, modifier: Modifier = Modifier) {
+internal fun MiniStat(label: String, value: String, modifier: Modifier = Modifier) {
     Column(
         modifier
             .clip(RoundedCornerShape(14.dp))

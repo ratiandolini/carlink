@@ -89,3 +89,45 @@ object Notifier {
         nm.notify(id, n)
     }
 }
+
+/** მანქანის პროფილი: სახელი, ბაკის მოცულობა და გაფრთხილების ზღვრები (სხვა მანქანისთვისაც იცვლება). */
+data class VehicleProfile(
+    val name: String = "Chevrolet Cruze 2017",
+    val tankL: Float = 53f,
+    val fuelAlertPct: Int = 15,
+    val batteryAlertV: Float = 11.8f,
+    val coolantAlertC: Int = 105,
+)
+
+/** ცოცხალი გრაფიკის ერთი წერტილი. */
+data class LivePoint(
+    val boost: Float?,
+    val trim: Float?,
+    val rpm: Int?,
+    val speed: Int?,
+    val lph: Float?,
+)
+
+/** მომსახურების შეხსენება: რა, ბოლოს როდის გაკეთდა და რამდენ დღეში ერთხელ. */
+data class MaintItem(val name: String, val lastDone: Long, val intervalDays: Int) {
+    fun dueMillis(): Long = lastDone + intervalDays * 86_400_000L
+    fun daysLeft(now: Long = System.currentTimeMillis()): Int =
+        Math.floorDiv(dueMillis() - now, 86_400_000L).toInt()
+}
+
+/** საწვავის მიახლოებითი ხარჯი ლ/სთ: პირდაპირი PID 015E ან MAF-დან (ბენზინი, AFR 14.7, სიმკვრივე 740 გ/ლ). */
+fun fuelLph(s: CarSnapshot): Float? {
+    s.extra?.fuelRateLph?.let { return it }
+    val maf = s.mafGs ?: return null
+    val st = s.stftPct
+    val lt = s.ltftPct
+    val trim = if (st != null && lt != null) 1f + (st + lt) / 100f else 1f
+    return maf / 14.7f * trim * 3600f / 740f
+}
+
+/** ლიტრი 100 კმ-ზე (მხოლოდ მოძრაობისას, ≥ 5 კმ/სთ). */
+fun fuelPer100(s: CarSnapshot): Float? {
+    val lph = fuelLph(s) ?: return null
+    val v = s.speedKmh ?: return null
+    return if (v >= 5) lph / v * 100f else null
+}
