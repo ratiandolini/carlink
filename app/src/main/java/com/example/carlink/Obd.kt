@@ -70,6 +70,9 @@ interface ObdSource {
     /** Mode 02: გაყინული კადრი (პირობები, როცა შეცდომა დაფიქსირდა). მხოლოდ წაკითხვა. */
     suspend fun freezeFrame(): List<String>
 
+    /** Mode 06: ძრავის თვითტესტების შედეგები (გამოტოვებები, კატალიზატორი, O2, EVAP). მხოლოდ წაკითხვა. */
+    suspend fun onboardTests(): List<String>
+
     /** Mode 04: ძრავის (OBD-II) კოდების და Check Engine ნათურის წაშლა. */
     suspend fun clearDtcs(): String
 
@@ -85,7 +88,7 @@ private val SPP_UUID: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34
  * დაბლოკილია: 04 (კოდების წაშლა), 10/11 (სესია/გადატვირთვა), 14, 27, 2E, 2F, 31, 34-37 და ა.შ.
  */
 private val READ_ONLY = listOf(
-    Regex("^(01|02|03|07|0A)([0-9A-F]{2}){0,6}$"), // OBD-II წაკითხვა
+    Regex("^(01|02|03|06|07|0A)([0-9A-F]{2}){0,6}$"), // OBD-II წაკითხვა
     Regex("^09([0-9A-F]{2})$"),                    // მანქანის ინფო (VIN...)
     Regex("^22([0-9A-F]{2}){2,}$"),                // UDS ReadDataByIdentifier
     Regex("^19([0-9A-F]{2}){1,6}$"),               // UDS ReadDTCInformation
@@ -350,6 +353,64 @@ class Elm327Source(private val device: BluetoothDevice) : ObdSource {
             .takeIf { it.isNotEmpty() }
     }
 
+    private fun testName(m: Int): String = when {
+        m == 0x01 -> "O2 სენსორი B1S1"
+        m == 0x02 -> "O2 სენსორი B1S2"
+        m == 0x21 -> "კატალიზატორი (ბანკი 1)"
+        m == 0x31 -> "EGR"
+        m in 0x39..0x3C -> "EVAP გაჟონვის ტესტი"
+        m == 0x41 -> "O2 გამათბობელი B1S1"
+        m == 0x42 -> "O2 გამათბობელი B1S2"
+        m == 0xA1 -> "გამოტოვებები: ზოგადი"
+        m in 0xA2..0xAD -> "გამოტოვებები: ცილინდრი ${m - 0xA1}"
+        else -> "ტესტი %02X".format(m)
+    }
+
+    override suspend fun onboardTests(): List<String> = withContext(Dispatchers.IO) {
+        val mids = mutableListOf<Int>()
+        var base = 0
+        while (base <= 0xE0) {
+            val sid = "46%02X".format(base)
+            val resp = send("06%02X".format(base), 4000).uppercase()
+            val msg = isoMessages(resp).firstOrNull { it.startsWith(sid) } ?: break
+            val b = msg.substring(4).chunked(2).filter { it.length == 2 }.map { it.toInt(16) }
+            if (b.size < 4) break
+            val mask = b.take(4).fold(0L) { a, x -> (a shl 8) or x.toLong() }
+            for (i in 0 until 32) {
+                if (((mask shr (31 - i)) and 1L) == 1L) mids += base + i + 1
+            }
+            if ((mask and 1L) == 0L) break
+            base += 0x20
+        }
+        val real = mids.filter { it % 0x20 != 0 }
+        if (real.isEmpty()) return@withContext listOf("ამ მანქანამ Mode 06 ტესტები არ დააბრუნა")
+        val out = mutableListOf<String>()
+        for (mid in real.take(48)) {
+            ensureActive()
+            val resp = send("06%02X".format(mid), 4000).uppercase()
+            for (msg in isoMessages(resp)) {
+                if (!msg.startsWith("46")) continue
+                val bytes = msg.substring(2).chunked(2).filter { it.length == 2 }.map { it.toInt(16) }
+                var i = 0
+                while (i + 9 <= bytes.size) {
+                    val m = bytes[i]
+                    val tid = bytes[i + 1]
+                    val v = bytes[i + 3] * 256 + bytes[i + 4]
+                    val lo = bytes[i + 5] * 256 + bytes[i + 6]
+                    val hi = bytes[i + 7] * 256 + bytes[i + 8]
+                    val mark = when {
+                        lo == 0 && hi == 0 -> "?"
+                        v in lo..hi -> "✓"
+                        else -> "✗"
+                    }
+                    out += "${testName(m)} · TID %02X: %d (დასაშვები %d…%d) %s".format(tid, v, lo, hi, mark)
+                    i += 9
+                }
+            }
+        }
+        if (out.isEmpty()) listOf("ტესტების შედეგები ვერ წავიკითხე") else out
+    }
+
     override suspend fun freezeFrame(): List<String> = withContext(Dispatchers.IO) {
         val out = mutableListOf<String>()
         val dtc = freezeBytes("02")
@@ -554,6 +615,12 @@ class DemoSource : ObdSource {
         "კოდი, რომელმაც კადრი გააყინა: P0171",
         "დატვირთვა: 31%", "გამაგრილებელი: 90 °C", "მოკლე კორექცია: +6.2%",
         "გრძელი კორექცია: +11.7%", "MAP: 38 kPa", "ბრუნი: 1840", "სიჩქარე: 52 კმ/სთ",
+    )
+
+    override suspend fun onboardTests(): List<String> = listOf(
+        "გამოტოვებები: ცილინდრი 1 · TID 0C: 0 (დასაშვები 0…65535) ✓",
+        "გამოტოვებები: ცილინდრი 2 · TID 0C: 3 (დასაშვები 0…65535) ✓",
+        "კატალიზატორი (ბანკი 1) · TID A9: 412 (დასაშვები 0…380) ✗",
     )
 
     override suspend fun adapterInfo(): String = "ATI → DEMO\nATDP → DEMO\nATRV → 12.6V"

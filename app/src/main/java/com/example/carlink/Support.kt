@@ -131,3 +131,6 @@ fun fuelPer100(s: CarSnapshot): Float? {
     val v = s.speedKmh ?: return null
     return if (v >= 5) lph / v * 100f else null
 }
+
+/** ბორბლების წნევა, ხელით შეყვანილი (ბარი). */
+data class TireLog(val fl: Float?, val fr: Float?, val rl: Float?, val rr: Float?, val time: Long)

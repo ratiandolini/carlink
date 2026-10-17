@@ -108,6 +108,24 @@ fun ExplorerScreen(vm: CarViewModel) {
                 Button(onClick = { vm.readVin() }, enabled = canRun, modifier = Modifier.weight(1f), contentPadding = BtnPad) { BtnText("VIN") }
                 Button(onClick = { vm.scanEcus() }, enabled = canRun, modifier = Modifier.weight(1f), contentPadding = BtnPad) { BtnText("მოდულები") }
             }
+            Row(
+                Modifier.fillMaxWidth().padding(top = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Button(onClick = { vm.readIdentity() }, enabled = canRun, modifier = Modifier.weight(1f), contentPadding = BtnPad) { BtnText("მანქანის ID-ები") }
+            }
+        }
+
+        Card {
+            Text("GM ძებნა (Mode 22, ძრავის კომპიუტერი)", color = Muted, fontSize = 13.sp)
+            Text(
+                "ავტომატურად ეძებს, რა დამატებით მონაცემს აძლევს Cruze ძრავის კომპიუტერი (ზეთის ხანგრძლივობა, ბუსტის მოთხოვნა, გამოტოვებები და სხვა). მხოლოდ კითხულობს. გრძელდება რამდენიმე წუთი, შეგიძლია შეაჩერო. ბოლოს დააჭირე «გაზიარება» ლოგში და გამომიგზავნე.",
+                color = TextMain, fontSize = 13.sp, modifier = Modifier.padding(vertical = 8.dp),
+            )
+            Button(
+                onClick = { vm.gmSearch() }, enabled = canRun,
+                modifier = Modifier.fillMaxWidth(), contentPadding = BtnPad,
+            ) { BtnText("GM ძებნის დაწყება") }
         }
 
         Card {

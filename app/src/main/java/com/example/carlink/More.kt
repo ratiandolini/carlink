@@ -1,6 +1,12 @@
 package com.example.carlink
 
 import android.content.Intent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.material3.TextButton
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -48,10 +54,14 @@ fun MoreScreen(vm: CarViewModel, withBluetooth: (() -> Unit) -> Unit) {
         Text("მეტი", color = TextMain, fontSize = 24.sp, fontWeight = FontWeight.Bold)
         LiveChartCard(ui)
         ExtraCard(ui)
+        TestsCard(ui, vm)
+        TripsCard(ui)
         WatchCard(ui, vm, withBluetooth)
         ProfileCard(ui, vm)
+        TiresCard(ui, vm)
         MaintCard(ui, vm)
         ExportCard(vm)
+        BackupCard(ui, vm)
     }
 }
 
@@ -380,5 +390,146 @@ private fun ExportCard(vm: CarViewModel) {
             },
             modifier = Modifier.padding(top = 8.dp), contentPadding = BtnPad,
         ) { BtnText("გაზიარება") }
+    }
+}
+
+// ---------- Mode 06 თვითტესტები ----------
+
+@Composable
+private fun TestsCard(ui: UiState, vm: CarViewModel) {
+    val can = ui.connection == Conn.Connected && ui.snapshot?.ecuAlive == true && !ui.testsBusy
+    Card {
+        Text("ძრავის თვითტესტები (Mode 06)", color = Muted, fontSize = 13.sp)
+        Spacer4()
+        Text(
+            "მანქანის საკუთარი ტესტების შედეგები: ცილინდრების გამოტოვებები, კატალიზატორი, ჟანგბადის სენსორები, EVAP. ✓ = ნორმის ფარგლებშია, ✗ = გასცდა, ? = ზღვარი არ არის. რიცხვები ნედლია (ერთეულის გარეშე) და დიაგნოზი არ არის, ის მექანიკოსს აჩვენე. მხოლოდ გაჩერებულ მანქანაზე.",
+            color = TextMain, fontSize = 13.sp,
+        )
+        Button(
+            onClick = { vm.readTests() }, enabled = can,
+            modifier = Modifier.padding(top = 8.dp), contentPadding = BtnPad,
+        ) { BtnText(if (ui.testsBusy) "ვკითხულობ…" else "წაკითხვა") }
+        ui.tests?.let { lines ->
+            Spacer4()
+            lines.forEach { l ->
+                Text(
+                    l,
+                    color = when {
+                        l.endsWith("✓") -> Good
+                        l.endsWith("✗") -> Bad
+                        else -> TextMain
+                    },
+                    fontSize = 12.sp,
+                )
+            }
+            TextButton(onClick = { vm.dismissTests() }) { Text("დახურვა") }
+        }
+    }
+}
+
+// ---------- მგზავრობების ისტორია ----------
+
+@Composable
+private fun TripsCard(ui: UiState) {
+    var all by remember { mutableStateOf(false) }
+    val fmt = SimpleDateFormat("d MMM HH:mm", Locale.getDefault())
+    Card {
+        Text("მგზავრობების ისტორია", color = Muted, fontSize = 13.sp)
+        Spacer4()
+        if (ui.trips.isEmpty()) {
+            Text("ჯერ ჩანაწერი არ არის.", color = Muted, fontSize = 13.sp)
+        }
+        ui.trips.reversed().take(if (all) 100 else 5).forEach { t ->
+            Text(
+                "${fmt.format(Date(t.start))} · ${t.moveSec / 60} წთ · %.1f კმ".format(t.distKm),
+                color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                "ბუსტი " + (if (t.maxMap > 0) "+${t.maxBoost} kPa" else "—") +
+                    " · კორექცია %+.1f%%".format(t.avgTrim) +
+                    " · ხარჯი " + (t.per100?.let { "%.1f ლ/100".format(it) } ?: "—"),
+                color = Muted, fontSize = 12.sp,
+            )
+            Spacer4()
+        }
+        if (ui.trips.size > 5) {
+            TextButton(onClick = { all = !all }) { Text(if (all) "ნაკლების ჩვენება" else "ყველას ჩვენება (${ui.trips.size})") }
+        }
+    }
+}
+
+// ---------- ბორბლების წნევა ხელით ----------
+
+@Composable
+private fun TiresCard(ui: UiState, vm: CarViewModel) {
+    val t = ui.tires
+    var fl by remember(t) { mutableStateOf(t?.fl?.toString().orEmpty()) }
+    var fr by remember(t) { mutableStateOf(t?.fr?.toString().orEmpty()) }
+    var rl by remember(t) { mutableStateOf(t?.rl?.toString().orEmpty()) }
+    var rr by remember(t) { mutableStateOf(t?.rr?.toString().orEmpty()) }
+    val num = KeyboardOptions(keyboardType = KeyboardType.Decimal)
+    fun p(s: String): Float? = s.replace(',', '.').toFloatOrNull()?.takeIf { it in 0.5f..6.5f }
+    Card {
+        Text("ბორბლების წნევა (ხელით)", color = Muted, fontSize = 13.sp)
+        Spacer4()
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedTextField(value = fl, onValueChange = { fl = it.take(4) }, label = { Text("წინა მარცხ.") }, singleLine = true, keyboardOptions = num, modifier = Modifier.weight(1f))
+            OutlinedTextField(value = fr, onValueChange = { fr = it.take(4) }, label = { Text("წინა მარჯ.") }, singleLine = true, keyboardOptions = num, modifier = Modifier.weight(1f))
+        }
+        Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedTextField(value = rl, onValueChange = { rl = it.take(4) }, label = { Text("უკან მარცხ.") }, singleLine = true, keyboardOptions = num, modifier = Modifier.weight(1f))
+            OutlinedTextField(value = rr, onValueChange = { rr = it.take(4) }, label = { Text("უკან მარჯ.") }, singleLine = true, keyboardOptions = num, modifier = Modifier.weight(1f))
+        }
+        Button(
+            onClick = { vm.saveTires(p(fl), p(fr), p(rl), p(rr)) },
+            modifier = Modifier.padding(top = 8.dp), contentPadding = BtnPad,
+        ) { BtnText("შენახვა") }
+        Spacer4()
+        Text(
+            "ბარი (მაგ. 2.3). რეკომენდებული წნევა წერია ეტიკეტზე მძღოლის კარის ჩარჩოში. წნევას ცივ ბორბლებზე ზომავენ. შეხსენებისთვის დაამატე «ბორბლების შემოწმება» ზემოთ შეხსენებებში.",
+            color = Muted, fontSize = 12.sp,
+        )
+    }
+}
+
+// ---------- ბექაპი ----------
+
+@Composable
+private fun BackupCard(ui: UiState, vm: CarViewModel) {
+    val ctx = LocalContext.current
+    val create = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
+        if (uri != null) {
+            try {
+                ctx.contentResolver.openOutputStream(uri)?.use { it.write(vm.backupText().toByteArray(Charsets.UTF_8)) }
+                vm.setBackupMsg("✓ ბექაპი შენახულია")
+            } catch (e: Exception) {
+                vm.setBackupMsg("⚠ შენახვა ვერ მოხერხდა: ${e.message}")
+            }
+        }
+    }
+    val open = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            try {
+                val text = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes().toString(Charsets.UTF_8) }.orEmpty()
+                vm.setBackupMsg(vm.restoreBackup(text))
+            } catch (e: Exception) {
+                vm.setBackupMsg("⚠ აღდგენა ვერ მოხერხდა: ${e.message}")
+            }
+        }
+    }
+    Card {
+        Text("ბექაპი და აღდგენა", color = Muted, fontSize = 13.sp)
+        Spacer4()
+        Text(
+            "შეინახე მგზავრობები, კოდების ჟურნალი, ისტორია, შეხსენებები, პროფილი და ბორბლების ჩანაწერი ფაილად (მაგ. Google Drive ან Downloads). აპის წაშლამდე გააკეთე ბექაპი და ახალ ინსტალაციაზე აღადგინე. აღდგენა არსებულ ჩანაწერებს ცვლის.",
+            color = TextMain, fontSize = 13.sp,
+        )
+        Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = { create.launch("carlink-backup.txt") }, modifier = Modifier.weight(1f), contentPadding = BtnPad) { BtnText("შენახვა") }
+            OutlinedButton(onClick = { open.launch(arrayOf("text/plain", "*/*")) }, modifier = Modifier.weight(1f), contentPadding = BtnPad) { BtnText("აღდგენა") }
+        }
+        ui.backupMsg?.let {
+            Text(it, color = if (it.startsWith("✓")) Good else Warn, fontSize = 13.sp, modifier = Modifier.padding(top = 8.dp))
+        }
     }
 }

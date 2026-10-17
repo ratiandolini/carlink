@@ -43,6 +43,10 @@ data class UiState(
     val live: List<LivePoint> = emptyList(),
     val freeze: List<String>? = null,
     val maint: List<MaintItem> = emptyList(),
+    val tests: List<String>? = null,
+    val testsBusy: Boolean = false,
+    val tires: TireLog? = null,
+    val backupMsg: String? = null,
 )
 
 data class ExplorerState(
@@ -65,6 +69,7 @@ class CarViewModel(app: Application) : AndroidViewModel(app) {
             profile = loadProfile(),
             watching = prefs.getBoolean("watching", false),
             maint = loadMaint(),
+            tires = loadTires(),
         )
     )
     val state: StateFlow<UiState> = _state.asStateFlow()
@@ -89,7 +94,7 @@ class CarViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val h = withContext(Dispatchers.IO) { history.load() }
             val l = withContext(Dispatchers.IO) { dtcLog.load() }
-            val t = withContext(Dispatchers.IO) { tripStore.load() }
+            val t = withContext(Dispatchers.IO) { tripStore.load(100) }
             _state.update { it.copy(history = h, dtcLog = l, trips = t) }
             checkMaint()
         }
@@ -117,6 +122,134 @@ class CarViewModel(app: Application) : AndroidViewModel(app) {
             .putInt("p_cool", p.coolantAlertC)
             .apply()
         _state.update { it.copy(profile = p) }
+    }
+
+    private fun loadTires(): TireLog? {
+        val t = prefs.getLong("tire_t", 0L)
+        if (t == 0L) return null
+        fun f(k: String) = prefs.getString(k, null)?.toFloatOrNull()
+        return TireLog(f("tire_fl"), f("tire_fr"), f("tire_rl"), f("tire_rr"), t)
+    }
+
+    fun saveTires(fl: Float?, fr: Float?, rl: Float?, rr: Float?) {
+        val now = System.currentTimeMillis()
+        prefs.edit()
+            .putString("tire_fl", fl?.toString()).putString("tire_fr", fr?.toString())
+            .putString("tire_rl", rl?.toString()).putString("tire_rr", rr?.toString())
+            .putLong("tire_t", now).apply()
+        _state.update { it.copy(tires = TireLog(fl, fr, rl, rr, now)) }
+    }
+
+    /** Mode 06 თვითტესტები. მხოლოდ გაჩერებულ მანქანაზე (ადაპტერს რამდენიმე წამით იკავებს). */
+    fun readTests() {
+        val src = source ?: return
+        if ((_state.value.snapshot?.speedKmh ?: 0) > 0) {
+            _state.update { it.copy(tests = listOf("⛔ მანქანა მოძრაობს. ტესტები მხოლოდ გაჩერებულზე იკითხება")) }
+            return
+        }
+        if (_state.value.testsBusy) return
+        viewModelScope.launch {
+            _state.update { it.copy(testsBusy = true, tests = null) }
+            try {
+                val r = ioMutex.withLock { src.onboardTests() }
+                _state.update { it.copy(tests = r) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _state.update { it.copy(tests = listOf("⚠ ${e.message ?: "ვერ წავიკითხე"}")) }
+            } finally {
+                _state.update { it.copy(testsBusy = false) }
+            }
+        }
+    }
+
+    fun dismissTests() {
+        _state.update { it.copy(tests = null) }
+    }
+
+    // ---------- ბექაპი ----------
+
+    fun backupText(): String {
+        val dir = getApplication<Application>().filesDir
+        fun file(n: String) = File(dir, n).takeIf { it.exists() }?.readText().orEmpty().trimEnd()
+        val p = _state.value.profile
+        return buildString {
+            append("CARLINK-BACKUP v1\n")
+            append("@@trips.csv\n").append(file("trips.csv")).append("\n")
+            append("@@dtc_log.txt\n").append(file("dtc_log.txt")).append("\n")
+            append("@@history.csv\n").append(file("history.csv")).append("\n")
+            append("@@maint\n").append(prefs.getString("maint", "").orEmpty()).append("\n")
+            append("@@profile\n")
+            append("name=${p.name}\ntank=${p.tankL}\nfuel=${p.fuelAlertPct}\nbatt=${p.batteryAlertV}\ncool=${p.coolantAlertC}\n")
+            append("@@tires\n")
+            listOf("tire_fl", "tire_fr", "tire_rl", "tire_rr").forEach { append(it).append("=").append(prefs.getString(it, "").orEmpty()).append("\n") }
+            append("tire_t=").append(prefs.getLong("tire_t", 0L)).append("\n")
+        }
+    }
+
+    /** აბრუნებს შედეგის ტექსტს. არსებულ ჩანაწერებს სრულად ცვლის ბექაპის შიგთავსით. */
+    fun restoreBackup(text: String): String {
+        if (!text.startsWith("CARLINK-BACKUP")) return "⚠ ეს CarLink-ის ბექაპი არ არის"
+        val sections = mutableMapOf<String, String>()
+        var cur: String? = null
+        val sb = StringBuilder()
+        for (line in text.lines().drop(1)) {
+            if (line.startsWith("@@")) {
+                cur?.let { sections[it] = sb.toString().trimEnd() }
+                cur = line.substring(2).trim()
+                sb.clear()
+            } else {
+                sb.append(line).append("\n")
+            }
+        }
+        cur?.let { sections[it] = sb.toString().trimEnd() }
+        return try {
+            val dir = getApplication<Application>().filesDir
+            for (n in listOf("trips.csv", "dtc_log.txt", "history.csv")) {
+                val body = sections[n].orEmpty()
+                File(dir, n).writeText(if (body.isEmpty()) "" else body + "\n")
+            }
+            val e = prefs.edit()
+            e.putString("maint", sections["maint"].orEmpty())
+            sections["profile"]?.lines()?.forEach { l ->
+                val i = l.indexOf('=')
+                if (i > 0) {
+                    val k = l.substring(0, i)
+                    val v = l.substring(i + 1)
+                    when (k) {
+                        "name" -> e.putString("p_name", v)
+                        "tank" -> v.toFloatOrNull()?.let { e.putFloat("p_tank", it) }
+                        "fuel" -> v.toIntOrNull()?.let { e.putInt("p_fuel", it) }
+                        "batt" -> v.toFloatOrNull()?.let { e.putFloat("p_batt", it) }
+                        "cool" -> v.toIntOrNull()?.let { e.putInt("p_cool", it) }
+                    }
+                }
+            }
+            sections["tires"]?.lines()?.forEach { l ->
+                val i = l.indexOf('=')
+                if (i > 0) {
+                    val k = l.substring(0, i)
+                    val v = l.substring(i + 1)
+                    if (k == "tire_t") e.putLong(k, v.toLongOrNull() ?: 0L)
+                    else if (k.startsWith("tire_")) e.putString(k, v.ifEmpty { null })
+                }
+            }
+            e.apply()
+            val h = history.load()
+            _state.update {
+                it.copy(
+                    history = h, dtcLog = dtcLog.load(), trips = tripStore.load(100),
+                    maint = loadMaint(), profile = loadProfile(), tires = loadTires(),
+                )
+            }
+            "✓ აღდგენილია: ${tripStore.load(100).size} მგზავრობა, ${loadMaint().size} შეხსენება"
+        } catch (ex: Exception) {
+            "⚠ აღდგენა ვერ მოხერხდა: ${ex.message}"
+        }
+    }
+
+    fun setBackupMsg(msg: String?) {
+        _state.update { it.copy(backupMsg = msg) }
     }
 
     private fun loadMaint(): List<MaintItem> =
@@ -452,6 +585,42 @@ class CarViewModel(app: Application) : AndroidViewModel(app) {
         log("$h: ნაპოვნია $hits · უარყოფითი პასუხი: $negatives")
     }
 
+    private fun ninesText(resp: String, sid: String, hex: Boolean): String? {
+        val m = isoMessages(resp.uppercase()).firstOrNull { it.startsWith(sid) } ?: return null
+        val bytes = m.substring(sid.length).chunked(2).filter { it.length == 2 }.map { it.toInt(16) }.drop(1)
+        if (bytes.isEmpty()) return null
+        return if (hex) bytes.joinToString(" ") { "%02X".format(it) }
+        else bytes.filter { it in 0x20..0x7E }.map { it.toChar() }.joinToString("").trim().ifEmpty { null }
+    }
+
+    /** Mode 09: კალიბრაციის ID, CVN, ECU-ს სახელი (მხოლოდ წაკითხვა). */
+    private suspend fun identityLines(src: ObdSource) {
+        log("კალიბრაციის ID (0904): " + (ninesText(src.raw(null, "0904", 4000), "4904", false) ?: "არ გვპასუხობს"))
+        log("CVN (0906): " + (ninesText(src.raw(null, "0906", 4000), "4906", true) ?: "არ გვპასუხობს"))
+        log("ECU სახელი (090A): " + (ninesText(src.raw(null, "090A", 4000), "490A", false) ?: "არ გვპასუხობს"))
+    }
+
+    fun readIdentity() = explorer("მანქანის ID-ები (Mode 09)") { src -> identityLines(src) }
+
+    /** GM Mode 22 ძებნა ძრავის კომპიუტერზე (7E0): ვეძებთ DID-ებს, რასაც მანქანა პასუხობს. */
+    fun gmSearch() {
+        if (movingNow()) {
+            log("⛔ მანქანა მოძრაობს. ძებნა მხოლოდ გაჩერებულზე")
+            return
+        }
+        explorer("GM ძებნა (Mode 22, 7E0)") { src ->
+            val ranges = listOf(
+                0x0000..0x00FF, 0x1100..0x11FF, 0x1200..0x12FF,
+                0x2000..0x20FF, 0x2200..0x22FF, 0xF100..0xF1FF,
+            )
+            for (r in ranges) {
+                log("დიაპაზონი %04X–%04X".format(r.first, r.last))
+                sweepRange(src, "7E0", r.first, r.last)
+                if (movingNow()) break
+            }
+        }
+    }
+
     /** ერთი ღილაკი: ადაპტერის ინფო, PID-ები, VIN, ECU ძებნა 7E0–7E7, საიდენტიფიკაციო DID-ები. */
     fun fullTest() {
         if (movingNow()) {
@@ -466,6 +635,7 @@ class CarViewModel(app: Application) : AndroidViewModel(app) {
             val v = src.vin()
             _ex.update { it.copy(vin = v) }
             log("VIN: ${v ?: "ვერ წავიკითხე"}")
+            identityLines(src)
             val responders = mutableListOf<String>()
             for (n in 0..7) {
                 val h = "7E$n"
@@ -689,7 +859,7 @@ class CarViewModel(app: Application) : AndroidViewModel(app) {
     private fun saveTrip(t: TripSummary) {
         try {
             tripStore.append(t)
-            val all = tripStore.load()
+            val all = tripStore.load(100)
             _state.update { it.copy(trips = all) }
         } catch (e: Exception) {
         }

@@ -395,15 +395,20 @@ private fun Dashboard(vm: CarViewModel, withBluetooth: (() -> Unit) -> Unit) {
         Card {
             Text("ბორბლების წნევა", color = Muted, fontSize = 13.sp)
             Spacer4()
+            val tl = ui.tires
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                listOf("წინა მარცხ.", "წინა მარჯ.").forEach { Tire(it, Modifier.weight(1f)) }
+                Tire("წინა მარცხ. (ბარი)", tl?.fl, Modifier.weight(1f))
+                Tire("წინა მარჯ. (ბარი)", tl?.fr, Modifier.weight(1f))
             }
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth().padding(top = 10.dp)) {
-                listOf("უკან მარცხ.", "უკან მარჯ.").forEach { Tire(it, Modifier.weight(1f)) }
+                Tire("უკან მარცხ. (ბარი)", tl?.rl, Modifier.weight(1f))
+                Tire("უკან მარჯ. (ბარი)", tl?.rr, Modifier.weight(1f))
             }
             Spacer4()
             Text(
-                "წნევის მოთხოვნა მანქანაზე ტესტით უნდა დადგინდეს («ექსპლორერი» ჩანართი).",
+                if (tl != null) "ხელით შეყვანილი: " + SimpleDateFormat("d MMM yyyy", Locale.getDefault()).format(Date(tl.time)) +
+                    ". ავტომატურად ამ ადაპტერით წნევა არ იკითხება (სჭირდება ახალი სენსორები). შეყვანა: «მეტი» ჩანართი."
+                else "ავტომატურად ამ ადაპტერით წნევა არ იკითხება (სჭირდება ახალი სენსორები). ხელით შეყვანა: «მეტი» ჩანართი.",
                 color = Muted, fontSize = 12.sp,
             )
         }
@@ -527,7 +532,7 @@ internal fun MiniStat(label: String, value: String, modifier: Modifier = Modifie
 }
 
 @Composable
-private fun Tire(label: String, modifier: Modifier = Modifier) {
+private fun Tire(label: String, value: Float?, modifier: Modifier = Modifier) {
     Column(
         modifier
             .clip(RoundedCornerShape(14.dp))
@@ -535,7 +540,10 @@ private fun Tire(label: String, modifier: Modifier = Modifier) {
             .padding(12.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Text("—", color = Muted, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+        Text(
+            value?.let { "%.1f".format(it) } ?: "—",
+            color = if (value != null) TextMain else Muted, fontSize = 22.sp, fontWeight = FontWeight.Bold,
+        )
         Text(label, color = Muted, fontSize = 12.sp)
     }
 }
