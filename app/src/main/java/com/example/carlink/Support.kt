@@ -143,3 +143,16 @@ fun fuelPer100(s: CarSnapshot): Float? {
 
 /** ბორბლების წნევა, ხელით შეყვანილი (ბარი). */
 data class TireLog(val fl: Float?, val fr: Float?, val rl: Float?, val rr: Float?, val time: Long)
+
+/** ბენზინის შევსების ჩანაწერი: ლიტრი და დონე (%) ჩასხმამდე და მერე. */
+data class RefuelItem(val time: Long, val liters: Float, val before: Float?, val after: Float?) {
+    /** ბაკის მოცულობის შეფასება, თუ დონის ცვლილება ≥ 20 პუნქტია. */
+    fun tankEstimate(): Float? {
+        val b = before ?: return null
+        val a = after ?: return null
+        return if (a - b >= 20f) liters / ((a - b) / 100f) else null
+    }
+}
+
+/** ცივი დაქოქვა: ძრავის გათბობისას საწვავის კორექციის შეჯამება. */
+data class ColdStart(val time: Long, val startC: Int, val minutes: Int, val avgTrim: Float, val maxTrim: Float, val avgLtft: Float)

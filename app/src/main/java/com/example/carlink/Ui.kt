@@ -154,6 +154,8 @@ private fun Dashboard(vm: CarViewModel, withBluetooth: (() -> Unit) -> Unit) {
             Card { Text(ui.error ?: "", color = Bad, fontSize = 14.sp) }
         }
 
+        HealthCard(ui, useSaved)
+
         // ბენზინი
         Card {
             Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
@@ -483,6 +485,69 @@ private fun Dashboard(vm: CarViewModel, withBluetooth: (() -> Unit) -> Unit) {
 @Composable
 internal fun Spacer4() {
     Box(Modifier.size(4.dp))
+}
+
+/** ერთი შეხედვით მდგომარეობა: მწვანე = კარგი, ყვითელი = ყურადღება, წითელი = საჭიროა მოქმედება. */
+@Composable
+private fun HealthCard(ui: UiState, useSaved: Boolean) {
+    val snap = ui.snapshot
+    val live = !useSaved && snap != null
+    val p = ui.profile
+    val saved = ui.lastSaved
+    val rows = mutableListOf<Triple<String, String, Color>>()
+
+    val dtcs = if (live) snap!!.dtcs else saved?.dtcs.orEmpty()
+    rows += if (!live && saved == null) Triple("შეცდომის კოდები", "მონაცემი არ არის", Muted)
+    else if (dtcs.isEmpty()) Triple("შეცდომის კოდები", "არ ჩანს", Good)
+    else Triple("შეცდომის კოდები", "${dtcs.size} კოდი", Warn)
+
+    val mil = if (live) snap!!.extra?.milOn else null
+    if (mil != null) rows += Triple("Check Engine", if (mil) "ანთია" else "ჩამქრალია", if (mil) Warn else Good)
+
+    val v = if (live) snap!!.batteryV else saved?.batteryV
+    if (v != null) {
+        val running = live && (snap!!.rpm ?: 0) > 400
+        val col = if (running) (if (v < 13.0f) Warn else Good) else if (v < p.batteryAlertV) Bad else if (v < 12.2f) Warn else Good
+        rows += Triple("აკუმულატორი", "%.1f V".format(v), col)
+    }
+
+    val c = if (live) snap!!.coolantC else null
+    if (c != null) {
+        rows += Triple(
+            "ძრავის ტემპერატურა", "$c °C",
+            if (c > p.coolantAlertC) Bad else if (c > 100) Warn else if (c < 60) Muted else Good,
+        )
+    }
+
+    val f = if (live) snap!!.fuelPercent else saved?.fuelPercent
+    if (f != null) {
+        rows += Triple(
+            "ბენზინი", "%.0f%%".format(f),
+            if (f < p.fuelAlertPct) Bad else if (f < p.fuelAlertPct + 10) Warn else Good,
+        )
+    }
+
+    val over = ui.maint.count { m -> (m.daysLeft()?.let { it < 0 } ?: false) || (m.kmLeft(ui.odoKm)?.let { it < 0 } ?: false) }
+    val soon = ui.maint.count { m -> (m.daysLeft()?.let { it in 0..13 } ?: false) || (m.kmLeft(ui.odoKm)?.let { it in 0..499 } ?: false) }
+    rows += if (ui.maint.isEmpty()) Triple("შეხსენებები", "არ არის დამატებული", Muted)
+    else if (over > 0) Triple("შეხსენებები", "$over ვადაგადაცილებული", Bad)
+    else if (soon > 0) Triple("შეხსენებები", "$soon მალე", Warn)
+    else Triple("შეხსენებები", "ყველაფერი ვადაშია", Good)
+
+    Card {
+        Text("მდგომარეობა", color = Muted, fontSize = 13.sp)
+        Spacer4()
+        rows.forEach { (label, text, color) ->
+            Row(
+                Modifier.fillMaxWidth().padding(vertical = 5.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(Modifier.size(10.dp).clip(CircleShape).background(color))
+                Text(label, color = TextMain, fontSize = 14.sp, modifier = Modifier.padding(start = 10.dp).weight(1f))
+                Text(text, color = color, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            }
+        }
+    }
 }
 
 @Composable

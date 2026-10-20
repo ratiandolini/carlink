@@ -50,6 +50,8 @@ data class UiState(
     val odoKm: Int? = null,
     val curTripKm: Float = 0f,
     val curTripL: Float = 0f,
+    val refuels: List<RefuelItem> = emptyList(),
+    val cold: ColdStart? = null,
 )
 
 data class ExplorerState(
@@ -74,6 +76,8 @@ class CarViewModel(app: Application) : AndroidViewModel(app) {
             maint = loadMaint(),
             tires = loadTires(),
             odoKm = odoNow(),
+            refuels = loadRefuels(),
+            cold = loadCold(),
         )
     )
     val state: StateFlow<UiState> = _state.asStateFlow()
@@ -185,6 +189,7 @@ class CarViewModel(app: Application) : AndroidViewModel(app) {
             append("@@maint\n").append(prefs.getString("maint", "").orEmpty()).append("\n")
             append("@@profile\n")
             append("name=${p.name}\ntank=${p.tankL}\nfuel=${p.fuelAlertPct}\nbatt=${p.batteryAlertV}\ncool=${p.coolantAlertC}\n")
+            append("@@refuels\n").append(prefs.getString("refuels", "").orEmpty()).append("\n")
             append("@@odo\n")
             append("odo_base=${prefs.getFloat("odo_base", -1f)}\nodo_trk=${prefs.getFloat("odo_trk", 0f)}\ntrk_km=${prefs.getFloat("trk_km", 0f)}\n")
             append("@@tires\n")
@@ -217,6 +222,7 @@ class CarViewModel(app: Application) : AndroidViewModel(app) {
             }
             val e = prefs.edit()
             e.putString("maint", sections["maint"].orEmpty())
+            e.putString("refuels", sections["refuels"].orEmpty())
             sections["profile"]?.lines()?.forEach { l ->
                 val i = l.indexOf('=')
                 if (i > 0) {
@@ -253,6 +259,7 @@ class CarViewModel(app: Application) : AndroidViewModel(app) {
                 it.copy(
                     history = h, dtcLog = dtcLog.load(), trips = tripStore.load(100),
                     maint = loadMaint(), profile = loadProfile(), tires = loadTires(), odoKm = odoNow(),
+                    refuels = loadRefuels(),
                 )
             }
             "✓ აღდგენილია: ${tripStore.load(100).size} მგზავრობა, ${loadMaint().size} შეხსენება"
@@ -283,6 +290,135 @@ class CarViewModel(app: Application) : AndroidViewModel(app) {
         val n = name.trim()
         if (n.isEmpty() || (days <= 0 && km <= 0)) return
         storeMaint(_state.value.maint + MaintItem(n, System.currentTimeMillis(), days, odoNow() ?: -1, km))
+    }
+
+    // ---------- ბენზინის შევსება ----------
+
+    private fun loadRefuels(): List<RefuelItem> =
+        prefs.getString("refuels", "").orEmpty().lines().mapNotNull { line ->
+            val p = line.split("|")
+            if (p.size < 4) return@mapNotNull null
+            val t = p[0].toLongOrNull() ?: return@mapNotNull null
+            val l = p[1].toFloatOrNull() ?: return@mapNotNull null
+            RefuelItem(t, l, p[2].toFloatOrNull(), p[3].toFloatOrNull())
+        }
+
+    fun addRefuel(liters: Float, before: Float?, after: Float?) {
+        if (liters <= 0f) return
+        val l = (_state.value.refuels + RefuelItem(System.currentTimeMillis(), liters, before, after)).takeLast(50)
+        prefs.edit().putString("refuels", l.joinToString("\n") { "${it.time}|${it.liters}|${it.before ?: ""}|${it.after ?: ""}" }).apply()
+        _state.update { it.copy(refuels = l) }
+    }
+
+    fun clearRefuels() {
+        prefs.edit().putString("refuels", "").apply()
+        _state.update { it.copy(refuels = emptyList()) }
+    }
+
+    // ---------- ცივი დაქოქვა ----------
+
+    private var coldActive = false
+    private var coldDone = false
+    private var coldStartT = 0L
+    private var coldStartC = 0
+    private var coldN = 0
+    private var coldSum = 0.0
+    private var coldMax = -100f
+    private var coldLt = 0.0
+
+    private fun loadCold(): ColdStart? {
+        val p = prefs.getString("cold_last", null)?.split(",") ?: return null
+        if (p.size < 6) return null
+        return try {
+            ColdStart(p[0].toLong(), p[1].toInt(), p[2].toInt(), p[3].toFloat(), p[4].toFloat(), p[5].toFloat())
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun trackCold(s: CarSnapshot) {
+        val c = s.coolantC ?: return
+        if (!coldActive && !coldDone && c <= 50 && (s.rpm ?: 0) > 300) {
+            coldActive = true
+            coldStartT = s.timeMillis
+            coldStartC = c
+            coldN = 0; coldSum = 0.0; coldMax = -100f; coldLt = 0.0
+        }
+        if (!coldActive) return
+        val st = s.stftPct
+        val lt = s.ltftPct
+        if (st != null && lt != null) {
+            coldN++
+            coldSum += st + lt
+            coldLt += lt
+            coldMax = maxOf(coldMax, st + lt)
+        }
+        if (c >= 70 || s.timeMillis - coldStartT > 15 * 60_000L) endCold(s.timeMillis)
+    }
+
+    private fun endCold(now: Long) {
+        if (!coldActive) return
+        coldActive = false
+        coldDone = true
+        if (coldN < 10) return
+        val cs = ColdStart(
+            coldStartT, coldStartC, ((now - coldStartT) / 60_000L).toInt(),
+            (coldSum / coldN).toFloat(), coldMax, (coldLt / coldN).toFloat(),
+        )
+        prefs.edit().putString("cold_last", "${cs.time},${cs.startC},${cs.minutes},${cs.avgTrim},${cs.maxTrim},${cs.avgLtft}").apply()
+        _state.update { it.copy(cold = cs) }
+    }
+
+    // ---------- მექანიკოსის ანგარიში ----------
+
+    fun reportText(): String {
+        val ui = _state.value
+        val snap = ui.snapshot
+        val alive = snap != null && snap.ecuAlive
+        val saved = ui.lastSaved
+        val dtcs = if (alive) snap!!.dtcs else saved?.dtcs.orEmpty()
+        val fmt = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.getDefault())
+        return buildString {
+            append("CarLink ანგარიში · ${ui.profile.name}\n")
+            append("თარიღი: ${fmt.format(java.util.Date())}\n")
+            _ex.value.vin?.let { append("VIN: $it\n") }
+            ui.odoKm?.let { append("გარბენი (მიახლოებითი): $it კმ\n") }
+            append("\n## შეცდომის კოდები\n")
+            if (dtcs.isEmpty()) append("არ ჩანს\n") else dtcs.forEach { append("$it · ${dtcText(it)}\n") }
+            if (alive) {
+                snap!!.pendingDtcs.filter { it !in dtcs }.takeIf { it.isNotEmpty() }?.let { l ->
+                    append("მოლოდინში: " + l.joinToString(", ") + "\n")
+                }
+                snap.permanentDtcs.takeIf { it.isNotEmpty() }?.let { append("მუდმივი: " + it.joinToString(", ") + "\n") }
+                snap.extra?.let { x ->
+                    x.milOn?.let { append("Check Engine: " + (if (it) "ანთია" else "ჩამქრალია") + "\n") }
+                    x.distMilKm?.let { append("გავლილი კმ Check Engine-ის ანთებიდან: $it\n") }
+                    x.distClearedKm?.let { append("გავლილი კმ კოდების წაშლიდან: $it\n") }
+                    val notReady = x.readiness.filter { !it.second }.map { it.first }
+                    if (notReady.isNotEmpty()) append("გამონაბოლქვის ტესტები არ დასრულებულა: " + notReady.joinToString(", ") + "\n")
+                }
+            }
+            prefs.getString("freeze_txt", null)?.let { fz ->
+                val t = prefs.getLong("freeze_t", 0L)
+                append("\n## გაყინული კადრი (${if (t > 0) fmt.format(java.util.Date(t)) else "?"})\n").append(fz).append("\n")
+            }
+            ui.trips.lastOrNull()?.let { t ->
+                append("\n## ბოლო მგზავრობა (${fmt.format(java.util.Date(t.start))}, ${t.moveSec / 60} წთ, %.1f კმ)\n".format(t.distKm))
+                append("მაქს. სიჩქარე ${t.maxSpeed} კმ/სთ, მაქს. ბრუნი ${t.maxRpm}, მაქს. დატვირთვა ${t.maxLoad}%\n")
+                append("MAP მაქს. ${t.maxMap} kPa, ბარომეტრი ${t.baro} kPa, ბუსტი %+d kPa\n".format(t.maxBoost))
+                append("საწვავის კორექცია საშუალოდ %+.1f%%, მაქს. %+.1f%%\n".format(t.avgTrim, t.maxTrim))
+                t.per100?.let { append("ხარჯი %.1f ლ/100 კმ (მიახლოებითი)\n".format(it)) }
+            }
+            ui.cold?.let { c ->
+                append("\n## ცივი დაქოქვა (${fmt.format(java.util.Date(c.time))})\n")
+                append("საწყისი ტემპერატურა ${c.startC} °C, ${c.minutes} წთ, კორექცია საშუალოდ %+.1f%%, მაქს. %+.1f%%, გრძელი საშუალოდ %+.1f%%\n".format(c.avgTrim, c.maxTrim, c.avgLtft))
+            }
+            ui.tests?.takeIf { it.isNotEmpty() }?.let { l ->
+                append("\n## თვითტესტები (Mode 06)\n")
+                l.forEach { append(it).append("\n") }
+            }
+            append("\nანგარიში ავტომატურად შედგა CarLink-ით და დიაგნოზი არ არის.\n")
+        }
     }
 
     // გარბენი: ხელით შეყვანილი საწყისი + მგზავრობებით დათვლილი მანძილი (ზუსტი ოდომეტრი OBD-ით არ იკითხება)
@@ -398,6 +534,8 @@ class CarViewModel(app: Application) : AndroidViewModel(app) {
         var wasConnected = false
         fuelWin.clear()
         lowSince = 0L
+        coldActive = false
+        coldDone = false
         try {
             _state.update { it.copy(connection = Conn.Connecting, error = null, demo = demo) }
             src = if (demo) {
@@ -422,6 +560,7 @@ class CarViewModel(app: Application) : AndroidViewModel(app) {
                     save(snap)
                     checkAlerts(snap)
                     if (snap.ecuAlive) {
+                        trackCold(snap)
                         maybeLogHistory(snap)
                         recorder.update(snap)?.let { saveTrip(it) }
                     } else {
@@ -454,6 +593,7 @@ class CarViewModel(app: Application) : AndroidViewModel(app) {
             }
         } finally {
             recorder.finish()?.let { saveTrip(it) }
+            endCold(System.currentTimeMillis())
             _state.update { it.copy(tripActive = false, curTripKm = 0f, curTripL = 0f) }
             source = null
             src?.close()
@@ -495,6 +635,9 @@ class CarViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 val r = ioMutex.withLock { src.freezeFrame() }
+                if (r.size > 1) {
+                    prefs.edit().putString("freeze_txt", r.joinToString("\n")).putLong("freeze_t", System.currentTimeMillis()).apply()
+                }
                 _state.update { it.copy(freeze = r) }
             } catch (e: CancellationException) {
                 throw e

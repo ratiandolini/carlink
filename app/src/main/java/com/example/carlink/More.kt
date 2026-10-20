@@ -44,6 +44,8 @@ import androidx.compose.ui.unit.sp
 @Composable
 fun MoreScreen(vm: CarViewModel, withBluetooth: (() -> Unit) -> Unit) {
     val ui by vm.state.collectAsState()
+    var sec by remember { mutableStateOf(0) }
+    val names = listOf("გრაფიკი", "მონაცემები", "სერვისი", "პარამეტრები")
     Column(
         Modifier
             .fillMaxSize()
@@ -52,16 +54,35 @@ fun MoreScreen(vm: CarViewModel, withBluetooth: (() -> Unit) -> Unit) {
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         Text("მეტი", color = TextMain, fontSize = 24.sp, fontWeight = FontWeight.Bold)
-        LiveChartCard(ui)
-        ExtraCard(ui)
-        TestsCard(ui, vm)
-        TripsCard(ui)
-        WatchCard(ui, vm, withBluetooth)
-        ProfileCard(ui, vm)
-        TiresCard(ui, vm)
-        MaintCard(ui, vm)
-        ExportCard(vm)
-        BackupCard(ui, vm)
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            names.forEachIndexed { i, n ->
+                if (i == sec) Button(onClick = { sec = i }, contentPadding = BtnPad) { BtnText(n) }
+                else OutlinedButton(onClick = { sec = i }, contentPadding = BtnPad) { BtnText(n) }
+            }
+        }
+        when (sec) {
+            0 -> {
+                LiveChartCard(ui)
+                TripsCard(ui)
+                ColdCard(ui)
+            }
+            1 -> {
+                ReportCard(vm)
+                ExtraCard(ui)
+                TestsCard(ui, vm)
+            }
+            2 -> {
+                MaintCard(ui, vm)
+                RefuelCard(ui, vm)
+                TiresCard(ui, vm)
+            }
+            else -> {
+                WatchCard(ui, vm, withBluetooth)
+                ProfileCard(ui, vm)
+                ExportCard(vm)
+                BackupCard(ui, vm)
+            }
+        }
     }
 }
 
@@ -580,5 +601,122 @@ private fun BackupCard(ui: UiState, vm: CarViewModel) {
         ui.backupMsg?.let {
             Text(it, color = if (it.startsWith("✓")) Good else Warn, fontSize = 13.sp, modifier = Modifier.padding(top = 8.dp))
         }
+    }
+}
+
+// ---------- ცივი დაქოქვა ----------
+
+@Composable
+private fun ColdCard(ui: UiState) {
+    val c = ui.cold
+    Card {
+        Text("ცივი დაქოქვა", color = Muted, fontSize = 13.sp)
+        Spacer4()
+        if (c == null) {
+            Text(
+                "დააკავშირე აპი, როცა ძრავი ცივია (გამაგრილებელი ≤ 50 °C), და დაქოქე. აპი ჩაწერს, როგორ იქცევა საწვავის კორექცია გათბობისას. ხარვეზები, მაგალითად ჰაერის გაჟონვა, ხშირად ცივ ძრავზე უფრო ჩანს.",
+                color = Muted, fontSize = 13.sp,
+            )
+            return@Card
+        }
+        val fmt = SimpleDateFormat("d MMM HH:mm", Locale.getDefault())
+        Text("${fmt.format(Date(c.time))} · საწყისი ${c.startC} °C · ${c.minutes} წთ", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        Spacer4()
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+            MiniStat("კორექცია (საშ.)", "%+.1f%%".format(c.avgTrim), Modifier.weight(1f))
+            MiniStat("კორექცია (მაქს.)", "%+.1f%%".format(c.maxTrim), Modifier.weight(1f))
+        }
+        Spacer4()
+        Text(
+            if (c.avgTrim >= 10f) "ცივ ძრავზე ნარევი ღარიბია. ეს ხშირად ჰაერის გაჟონვაზე მიუთითებს და მექანიკოსს გადაეცი."
+            else if (c.avgTrim <= -10f) "ცივ ძრავზე ნარევი მდიდარია."
+            else "ცივ ძრავზე კორექცია ნორმის ფარგლებშია.",
+            color = TextMain, fontSize = 13.sp,
+        )
+    }
+}
+
+// ---------- ბენზინის შევსება ----------
+
+@Composable
+private fun RefuelCard(ui: UiState, vm: CarViewModel) {
+    var liters by remember { mutableStateOf("") }
+    var before by remember { mutableStateOf("") }
+    var after by remember { mutableStateOf("") }
+    val num = KeyboardOptions(keyboardType = KeyboardType.Decimal)
+    fun f(x: String): Float? = x.replace(',', '.').toFloatOrNull()
+    val fmt = SimpleDateFormat("d MMM", Locale.getDefault())
+    Card {
+        Text("ბენზინის შევსება", color = Muted, fontSize = 13.sp)
+        Spacer4()
+        Text(
+            "შევსებისას ჩაწერე ჩასხმული ლიტრები და დონე (%) ჩასხმამდე და მერე (დაფაზე ჩანს). ამით აპი ბაკის მოცულობას დააზუსტებს და დარჩენილი კმ უფრო სწორი გახდება.",
+            color = TextMain, fontSize = 13.sp,
+        )
+        Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedTextField(value = liters, onValueChange = { liters = it.take(5) }, label = { Text("ლიტრი") }, singleLine = true, keyboardOptions = num, modifier = Modifier.weight(1f))
+            OutlinedTextField(value = before, onValueChange = { before = it.take(3) }, label = { Text("დონე მანამდე %") }, singleLine = true, keyboardOptions = num, modifier = Modifier.weight(1f))
+            OutlinedTextField(value = after, onValueChange = { after = it.take(3) }, label = { Text("მერე %") }, singleLine = true, keyboardOptions = num, modifier = Modifier.weight(1f))
+        }
+        Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(
+                onClick = {
+                    f(liters)?.let { vm.addRefuel(it, f(before), f(after)) }
+                    liters = ""; before = ""; after = ""
+                },
+                contentPadding = BtnPad,
+            ) { BtnText("დამატება") }
+            ui.snapshot?.fuelPercent?.let { cur ->
+                OutlinedButton(onClick = { after = "%.0f".format(cur) }, contentPadding = BtnPad) { BtnText("ახლანდელი: %.0f%%".format(cur)) }
+            }
+        }
+        if (ui.refuels.isNotEmpty()) {
+            Spacer4()
+            ui.refuels.takeLast(5).reversed().forEach { r ->
+                val est = r.tankEstimate()
+                Text(
+                    "${fmt.format(Date(r.time))} · %.1f ლ".format(r.liters) +
+                        (if (r.before != null && r.after != null) " · %.0f%% → %.0f%%".format(r.before, r.after) else "") +
+                        (est?.let { " · ბაკი ≈ %.0f ლ".format(it) } ?: ""),
+                    color = TextMain, fontSize = 13.sp,
+                )
+            }
+            val ests = ui.refuels.mapNotNull { it.tankEstimate() }.takeLast(5)
+            if (ests.isNotEmpty()) {
+                val avg = ests.average().toFloat()
+                Spacer4()
+                Text("ბაკის მოცულობა ჩანაწერებით ≈ %.0f ლ (ახლა პროფილში: %.0f ლ).".format(avg, ui.profile.tankL), color = Muted, fontSize = 12.sp)
+                OutlinedButton(
+                    onClick = { vm.saveProfile(ui.profile.copy(tankL = avg)) },
+                    modifier = Modifier.padding(top = 6.dp), contentPadding = BtnPad,
+                ) { BtnText("გამოიყენე ბაკის მოცულობად") }
+            }
+            TextButton(onClick = { vm.clearRefuels() }) { Text("ჩანაწერების წაშლა") }
+        }
+    }
+}
+
+// ---------- მექანიკოსის ანგარიში ----------
+
+@Composable
+private fun ReportCard(vm: CarViewModel) {
+    val ctx = LocalContext.current
+    Card {
+        Text("ანგარიში მექანიკოსისთვის", color = Muted, fontSize = 13.sp)
+        Spacer4()
+        Text(
+            "ერთ ტექსტად: კოდები და აღწერა, გაყინული კადრი (თუ წაკითხულია), ბოლო მგზავრობა (ბუსტი, კორექცია, ხარჯი), ცივი დაქოქვა, თვითტესტები. ჯერ დაფაზე დააჭირე «გაყინული კადრი», რომ ანგარიშში მოხვდეს.",
+            color = TextMain, fontSize = 13.sp,
+        )
+        Button(
+            onClick = {
+                val send = Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_TEXT, vm.reportText())
+                }
+                ctx.startActivity(Intent.createChooser(send, "გაგზავნა").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            },
+            modifier = Modifier.padding(top = 8.dp), contentPadding = BtnPad,
+        ) { BtnText("ანგარიშის გაზიარება") }
     }
 }
