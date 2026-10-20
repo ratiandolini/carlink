@@ -395,9 +395,11 @@ class Elm327Source(private val device: BluetoothDevice) : ObdSource {
                 while (i + 9 <= bytes.size) {
                     val m = bytes[i]
                     val tid = bytes[i + 1]
-                    val v = bytes[i + 3] * 256 + bytes[i + 4]
-                    val lo = bytes[i + 5] * 256 + bytes[i + 6]
-                    val hi = bytes[i + 7] * 256 + bytes[i + 8]
+                    val signed = (bytes[i + 2] and 0x80) != 0
+                    val conv = { x: Int -> if (signed && x >= 32768) x - 65536 else x }
+                    val v = conv(bytes[i + 3] * 256 + bytes[i + 4])
+                    val lo = conv(bytes[i + 5] * 256 + bytes[i + 6])
+                    val hi = conv(bytes[i + 7] * 256 + bytes[i + 8])
                     val mark = when {
                         lo == 0 && hi == 0 -> "?"
                         v in lo..hi -> "✓"

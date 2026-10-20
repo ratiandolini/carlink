@@ -47,6 +47,9 @@ data class UiState(
     val testsBusy: Boolean = false,
     val tires: TireLog? = null,
     val backupMsg: String? = null,
+    val odoKm: Int? = null,
+    val curTripKm: Float = 0f,
+    val curTripL: Float = 0f,
 )
 
 data class ExplorerState(
@@ -70,6 +73,7 @@ class CarViewModel(app: Application) : AndroidViewModel(app) {
             watching = prefs.getBoolean("watching", false),
             maint = loadMaint(),
             tires = loadTires(),
+            odoKm = odoNow(),
         )
     )
     val state: StateFlow<UiState> = _state.asStateFlow()
@@ -181,6 +185,8 @@ class CarViewModel(app: Application) : AndroidViewModel(app) {
             append("@@maint\n").append(prefs.getString("maint", "").orEmpty()).append("\n")
             append("@@profile\n")
             append("name=${p.name}\ntank=${p.tankL}\nfuel=${p.fuelAlertPct}\nbatt=${p.batteryAlertV}\ncool=${p.coolantAlertC}\n")
+            append("@@odo\n")
+            append("odo_base=${prefs.getFloat("odo_base", -1f)}\nodo_trk=${prefs.getFloat("odo_trk", 0f)}\ntrk_km=${prefs.getFloat("trk_km", 0f)}\n")
             append("@@tires\n")
             listOf("tire_fl", "tire_fr", "tire_rl", "tire_rr").forEach { append(it).append("=").append(prefs.getString(it, "").orEmpty()).append("\n") }
             append("tire_t=").append(prefs.getLong("tire_t", 0L)).append("\n")
@@ -225,6 +231,13 @@ class CarViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
             }
+            sections["odo"]?.lines()?.forEach { l ->
+                val i = l.indexOf('=')
+                if (i > 0) l.substring(i + 1).toFloatOrNull()?.let { v ->
+                    val k = l.substring(0, i)
+                    if (k == "odo_base" || k == "odo_trk" || k == "trk_km") e.putFloat(k, v)
+                }
+            }
             sections["tires"]?.lines()?.forEach { l ->
                 val i = l.indexOf('=')
                 if (i > 0) {
@@ -239,7 +252,7 @@ class CarViewModel(app: Application) : AndroidViewModel(app) {
             _state.update {
                 it.copy(
                     history = h, dtcLog = dtcLog.load(), trips = tripStore.load(100),
-                    maint = loadMaint(), profile = loadProfile(), tires = loadTires(),
+                    maint = loadMaint(), profile = loadProfile(), tires = loadTires(), odoKm = odoNow(),
                 )
             }
             "✓ აღდგენილია: ${tripStore.load(100).size} მგზავრობა, ${loadMaint().size} შეხსენება"
@@ -258,24 +271,38 @@ class CarViewModel(app: Application) : AndroidViewModel(app) {
             if (p.size < 3) return@mapNotNull null
             val t = p[1].toLongOrNull() ?: return@mapNotNull null
             val d = p[2].toIntOrNull() ?: return@mapNotNull null
-            MaintItem(p[0], t, d)
+            MaintItem(p[0], t, d, p.getOrNull(3)?.toIntOrNull() ?: -1, p.getOrNull(4)?.toIntOrNull() ?: 0)
         }
 
     private fun storeMaint(list: List<MaintItem>) {
-        prefs.edit().putString("maint", list.joinToString("\n") { "${it.name.replace("|", " ")}|${it.lastDone}|${it.intervalDays}" }).apply()
+        prefs.edit().putString("maint", list.joinToString("\n") { "${it.name.replace("|", " ")}|${it.lastDone}|${it.intervalDays}|${it.lastKm}|${it.intervalKm}" }).apply()
         _state.update { it.copy(maint = list) }
     }
 
-    fun addMaint(name: String, days: Int) {
+    fun addMaint(name: String, days: Int, km: Int) {
         val n = name.trim()
-        if (n.isEmpty() || days <= 0) return
-        storeMaint(_state.value.maint + MaintItem(n, System.currentTimeMillis(), days))
+        if (n.isEmpty() || (days <= 0 && km <= 0)) return
+        storeMaint(_state.value.maint + MaintItem(n, System.currentTimeMillis(), days, odoNow() ?: -1, km))
+    }
+
+    // გარბენი: ხელით შეყვანილი საწყისი + მგზავრობებით დათვლილი მანძილი (ზუსტი ოდომეტრი OBD-ით არ იკითხება)
+    private fun odoNow(): Int? {
+        val base = prefs.getFloat("odo_base", -1f)
+        if (base < 0f) return null
+        val driven = prefs.getFloat("trk_km", 0f) - prefs.getFloat("odo_trk", 0f) + recorder.liveDistKm
+        return (base + driven).roundToInt()
+    }
+
+    fun setOdometer(km: Int) {
+        if (km < 0) return
+        prefs.edit().putFloat("odo_base", km.toFloat()).putFloat("odo_trk", prefs.getFloat("trk_km", 0f)).apply()
+        _state.update { it.copy(odoKm = odoNow()) }
     }
 
     fun doneMaint(index: Int) {
         val l = _state.value.maint.toMutableList()
         if (index !in l.indices) return
-        l[index] = l[index].copy(lastDone = System.currentTimeMillis())
+        l[index] = l[index].copy(lastDone = System.currentTimeMillis(), lastKm = odoNow() ?: -1)
         storeMaint(l)
     }
 
@@ -288,9 +315,16 @@ class CarViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun checkMaint() {
         val ctx = getApplication<Application>()
+        val odo = odoNow()
         _state.value.maint.forEachIndexed { i, m ->
-            if (m.daysLeft() < 0) {
-                Notifier.notify(ctx, 20 + i, "დროა: ${m.name}", "ვადა ${-m.daysLeft()} დღით გადაცდა")
+            val dl = m.daysLeft()
+            val kl = m.kmLeft(odo)
+            if ((dl != null && dl < 0) || (kl != null && kl < 0)) {
+                val txt = listOfNotNull(
+                    dl?.takeIf { it < 0 }?.let { "ვადა ${-it} დღით გადაცდა" },
+                    kl?.takeIf { it < 0 }?.let { "გარბენი ${-it} კმ-ით გადაცდა" },
+                ).joinToString(" · ")
+                Notifier.notify(ctx, 20 + i, "დროა: ${m.name}", txt)
             }
         }
     }
@@ -362,6 +396,8 @@ class CarViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun connectOnce(demo: Boolean): Boolean {
         var src: ObdSource? = null
         var wasConnected = false
+        fuelWin.clear()
+        lowSince = 0L
         try {
             _state.update { it.copy(connection = Conn.Connecting, error = null, demo = demo) }
             src = if (demo) {
@@ -380,7 +416,7 @@ class CarViewModel(app: Application) : AndroidViewModel(app) {
             _state.update { it.copy(connection = Conn.Connected) }
             while (true) {
                 (active as? Elm327Source)?.probeIntervalMs = if (_state.value.watching) 150_000L else 15_000L
-                val snap = ioMutex.withLock { active.read() }
+                val snap = smoothFuel(ioMutex.withLock { active.read() })
                 _state.update { it.copy(snapshot = snap) }
                 if (!demo) {
                     save(snap)
@@ -391,7 +427,12 @@ class CarViewModel(app: Application) : AndroidViewModel(app) {
                     } else {
                         recorder.finish()?.let { saveTrip(it) }
                     }
-                    _state.update { it.copy(lastSaved = loadSaved(), tripActive = recorder.active) }
+                    _state.update {
+                        it.copy(
+                            lastSaved = loadSaved(), tripActive = recorder.active, odoKm = odoNow(),
+                            curTripKm = recorder.liveDistKm, curTripL = recorder.liveFuelL,
+                        )
+                    }
                 }
                 pushLive(snap)
                 delay(if (snap.ecuAlive) 1000L else if (_state.value.watching) 20_000L else 4_000L)
@@ -413,11 +454,23 @@ class CarViewModel(app: Application) : AndroidViewModel(app) {
             }
         } finally {
             recorder.finish()?.let { saveTrip(it) }
-            _state.update { it.copy(tripActive = false) }
+            _state.update { it.copy(tripActive = false, curTripKm = 0f, curTripL = 0f) }
             source = null
             src?.close()
         }
         return wasConnected
+    }
+
+    /** ბენზინის სენსორი ტარებისას "ცმუკავს" (ბაკში ბენზინი ტალღავს), ამიტომ ვიღებთ ბოლო 9 ჩვენების მედიანას. */
+    private val fuelWin = ArrayDeque<Float>()
+    private var lowSince = 0L
+
+    private fun smoothFuel(s: CarSnapshot): CarSnapshot {
+        val f = s.fuelPercent ?: return s
+        fuelWin.addLast(f)
+        while (fuelWin.size > 9) fuelWin.removeFirst()
+        val sorted = fuelWin.sorted()
+        return s.copy(fuelPercent = sorted[sorted.size / 2])
     }
 
     private fun pushLive(s: CarSnapshot) {
@@ -782,10 +835,17 @@ class CarViewModel(app: Application) : AndroidViewModel(app) {
         val ctx = getApplication<Application>()
         val p = _state.value.profile
         s.fuelPercent?.let {
-            if (it < p.fuelAlertPct && !fuelAlert) {
-                fuelAlert = true
-                Notifier.notify(ctx, 1, "ბენზინი დაბალია", "დარჩენილია დაახლოებით ${it.roundToInt()}%")
-            } else if (it > p.fuelAlertPct + 5) fuelAlert = false
+            if (it < p.fuelAlertPct) {
+                // ერთი ცუდი ჩვენება არ კმარა: დონე უნდა დარჩეს დაბალი მთელი წუთის განმავლობაში
+                if (lowSince == 0L) lowSince = s.timeMillis
+                if (!fuelAlert && s.timeMillis - lowSince >= 60_000L) {
+                    fuelAlert = true
+                    Notifier.notify(ctx, 1, "ბენზინი დაბალია", "დარჩენილია დაახლოებით ${it.roundToInt()}%")
+                }
+            } else {
+                lowSince = 0L
+                if (it > p.fuelAlertPct + 5) fuelAlert = false
+            }
         }
         s.batteryV?.let {
             if (it < p.batteryAlertV && !batteryAlert) {
@@ -859,8 +919,10 @@ class CarViewModel(app: Application) : AndroidViewModel(app) {
     private fun saveTrip(t: TripSummary) {
         try {
             tripStore.append(t)
+            prefs.edit().putFloat("trk_km", prefs.getFloat("trk_km", 0f) + t.distKm).apply()
             val all = tripStore.load(100)
-            _state.update { it.copy(trips = all) }
+            _state.update { it.copy(trips = all, odoKm = odoNow()) }
+            checkMaint()
         } catch (e: Exception) {
         }
     }

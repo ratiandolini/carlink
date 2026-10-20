@@ -108,11 +108,20 @@ data class LivePoint(
     val lph: Float?,
 )
 
-/** მომსახურების შეხსენება: რა, ბოლოს როდის გაკეთდა და რამდენ დღეში ერთხელ. */
-data class MaintItem(val name: String, val lastDone: Long, val intervalDays: Int) {
-    fun dueMillis(): Long = lastDone + intervalDays * 86_400_000L
-    fun daysLeft(now: Long = System.currentTimeMillis()): Int =
-        Math.floorDiv(dueMillis() - now, 86_400_000L).toInt()
+/** მომსახურების შეხსენება: ბოლოს როდის (და რამდენ კმ-ზე) გაკეთდა და რა ინტერვალით (დღე და/ან კმ). */
+data class MaintItem(
+    val name: String,
+    val lastDone: Long,
+    val intervalDays: Int,
+    val lastKm: Int = -1,
+    val intervalKm: Int = 0,
+) {
+    fun daysLeft(now: Long = System.currentTimeMillis()): Int? =
+        if (intervalDays <= 0) null
+        else Math.floorDiv(lastDone + intervalDays * 86_400_000L - now, 86_400_000L).toInt()
+
+    fun kmLeft(odo: Int?): Int? =
+        if (intervalKm <= 0 || lastKm < 0 || odo == null) null else lastKm + intervalKm - odo
 }
 
 /** საწვავის მიახლოებითი ხარჯი ლ/სთ: პირდაპირი PID 015E ან MAF-დან (ბენზინი, AFR 14.7, სიმკვრივე 740 გ/ლ). */

@@ -311,22 +311,65 @@ private fun ProfileCard(ui: UiState, vm: CarViewModel) {
 private fun MaintCard(ui: UiState, vm: CarViewModel) {
     var name by remember { mutableStateOf("") }
     var days by remember { mutableStateOf("") }
+    var km by remember { mutableStateOf("") }
+    var odo by remember(ui.odoKm == null) { mutableStateOf(ui.odoKm?.toString().orEmpty()) }
+    val num = KeyboardOptions(keyboardType = KeyboardType.Number)
+    // დასახელება, ინტერვალი კმ-ში, ინტერვალი დღეებში (ორიენტირი; ზუსტად იხილე მფლობელის სახელმძღვანელოში)
     val presets = listOf(
-        "ძრავის ზეთი" to 180, "საჰაერო ფილტრი" to 365, "ანტიფრიზი" to 730,
-        "მუხრუჭის სითხე" to 730, "ბორბლების შემოწმება" to 30,
+        Triple("ძრავის ზეთი და ფილტრი", 8000, 180),
+        Triple("საჰაერო ფილტრი", 20000, 730),
+        Triple("სალონის ფილტრი", 15000, 365),
+        Triple("ანთების სანთლები", 40000, 1460),
+        Triple("მუხრუჭის სითხე", 40000, 730),
+        Triple("გამაგრილებელი (ანტიფრიზი)", 100000, 1825),
+        Triple("ავტომატის ზეთი", 60000, 1825),
+        Triple("ბორბლების გადაადგილება", 10000, 180),
+        Triple("ბორბლების წნევა", 0, 30),
+        Triple("აკუმულატორის შემოწმება", 0, 365),
     )
     Card {
         Text("მომსახურების შეხსენებები", color = Muted, fontSize = 13.sp)
+        Spacer4()
+        Text(
+            "მიმდინარე გარბენი: " + (ui.odoKm?.let { "≈ %,d კმ".format(it) } ?: "ჯერ არ არის შეყვანილი"),
+            color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+        )
+        Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedTextField(
+                value = odo, onValueChange = { odo = it.filter { c -> c.isDigit() }.take(7) },
+                label = { Text("ოდომეტრი (კმ)") }, singleLine = true, keyboardOptions = num, modifier = Modifier.weight(2f),
+            )
+            Button(
+                onClick = { odo.toIntOrNull()?.let { vm.setOdometer(it) } },
+                modifier = Modifier.weight(1f).padding(top = 8.dp), contentPadding = BtnPad,
+            ) { BtnText("შენახვა") }
+        }
+        Spacer4()
+        Text(
+            "ოდომეტრი OBD-ით არ იკითხება. შეიყვანე ახლანდელი ციფრა და აპი მგზავრობებით დაუმატებს გავლილ კმ-ს. ხანდახან ისევ შეასწორე ხელით, რადგან აპის გარეშე გავლილი კმ არ ითვლება.",
+            color = Muted, fontSize = 12.sp,
+        )
         Spacer4()
         if (ui.maint.isEmpty()) {
             Text("ჯერ არაფერია დამატებული. აირჩიე ქვემოდან ან ჩაწერე საკუთარი.", color = Muted, fontSize = 13.sp)
         }
         ui.maint.forEachIndexed { i, m ->
-            val left = m.daysLeft()
+            val dl = m.daysLeft()
+            val kl = m.kmLeft(ui.odoKm)
+            val over = (dl != null && dl < 0) || (kl != null && kl < 0)
+            val soon = (dl != null && dl < 14) || (kl != null && kl < 500)
             Text(m.name, color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            val parts = listOfNotNull(
+                kl?.let { if (it < 0) "${-it} კმ-ით გადაცდა" else "დარჩა $it კმ" },
+                dl?.let { if (it < 0) "${-it} დღით გადაცდა" else "დარჩა $it დღე" },
+            )
             Text(
-                if (left < 0) "ვადა ${-left} დღით გადაცდა" else "დარჩა $left დღე (ყოველ ${m.intervalDays} დღეში)",
-                color = if (left < 0) Bad else if (left < 14) Warn else Muted, fontSize = 13.sp,
+                (if (parts.isEmpty()) "გარბენი ჯერ არ არის შეყვანილი" else parts.joinToString(" · ")) +
+                    "  (ყოველ " + listOfNotNull(
+                        m.intervalKm.takeIf { it > 0 }?.let { "$it კმ" },
+                        m.intervalDays.takeIf { it > 0 }?.let { "$it დღე" },
+                    ).joinToString(" / ") + ")",
+                color = if (over) Bad else if (soon) Warn else Muted, fontSize = 13.sp,
             )
             Row(Modifier.padding(vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = { vm.doneMaint(i) }, contentPadding = BtnPad) { BtnText("შესრულდა დღეს") }
@@ -334,12 +377,13 @@ private fun MaintCard(ui: UiState, vm: CarViewModel) {
             }
         }
         Spacer4()
+        Text("სწრაფი დამატება (ინტერვალი ორიენტირულია):", color = Muted, fontSize = 12.sp)
         Row(
-            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 6.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            presets.forEach { (n, d) ->
-                OutlinedButton(onClick = { vm.addMaint(n, d) }, contentPadding = BtnPad) { BtnText("+ $n") }
+            presets.forEach { (n, k, d) ->
+                OutlinedButton(onClick = { vm.addMaint(n, d, k) }, contentPadding = BtnPad) { BtnText("+ $n") }
             }
         }
         Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -347,22 +391,27 @@ private fun MaintCard(ui: UiState, vm: CarViewModel) {
                 value = name, onValueChange = { name = it.take(30) },
                 label = { Text("დასახელება") }, singleLine = true, modifier = Modifier.weight(2f),
             )
+        }
+        Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedTextField(
+                value = km, onValueChange = { km = it.filter { c -> c.isDigit() }.take(6) },
+                label = { Text("ყოველ ... კმ") }, singleLine = true, keyboardOptions = num, modifier = Modifier.weight(1f),
+            )
             OutlinedTextField(
                 value = days, onValueChange = { days = it.filter { c -> c.isDigit() }.take(4) },
-                label = { Text("დღე") }, singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.weight(1f),
+                label = { Text("ან ... დღე") }, singleLine = true, keyboardOptions = num, modifier = Modifier.weight(1f),
             )
         }
         Button(
             onClick = {
-                vm.addMaint(name, days.toIntOrNull() ?: 0)
-                name = ""; days = ""
+                vm.addMaint(name, days.toIntOrNull() ?: 0, km.toIntOrNull() ?: 0)
+                name = ""; days = ""; km = ""
             },
             modifier = Modifier.padding(top = 8.dp), contentPadding = BtnPad,
         ) { BtnText("დამატება") }
         Spacer4()
         Text(
-            "დროით ითვლება (დღეებით), რადგან მანქანის კილომეტრაჟს ეს კავშირი არ გვაწვდის. ვადის გადაცდენისას აპის გახსნისას შეტყობინება მოვა.",
+            "გაფრთხილება მოვა, როცა კმ ან დღე გადაცდება (აპის გახსნისას და მგზავრობის დასრულებისას). ზუსტი ინტერვალები შეამოწმე მანქანის სახელმძღვანელოში და მექანიკოსთან.",
             color = Muted, fontSize = 12.sp,
         )
     }
@@ -445,7 +494,7 @@ private fun TripsCard(ui: UiState) {
                 color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
             )
             Text(
-                "ბუსტი " + (if (t.maxMap > 0) "+${t.maxBoost} kPa" else "—") +
+                "ბუსტი " + (if (t.maxMap > 0) "%+d kPa".format(t.maxBoost) else "—") +
                     " · კორექცია %+.1f%%".format(t.avgTrim) +
                     " · ხარჯი " + (t.per100?.let { "%.1f ლ/100".format(it) } ?: "—"),
                 color = Muted, fontSize = 12.sp,

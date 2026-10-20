@@ -39,7 +39,7 @@ data class TripSummary(
             out += "ძლიერი დატვირთვა არ ყოფილა (მაქს. ${maxLoad}%), ამიტომ ბუსტის შეფასება ჯერ ზუსტი არ არის."
         }
         if (avgTrim >= 12f) {
-            out += "საწვავის კორექცია საშუალოდ +${"%.1f".format(avgTrim)}%: ნარევი ღარიბია (P0171-თან შესაბამისი)."
+            out += "საწვავის კორექცია საშუალოდ %+.1f%%: ნარევი ღარიბია (P0171-თან შესაბამისი).".format(avgTrim)
         } else if (avgTrim <= -12f) {
             out += "საწვავის კორექცია საშუალოდ ${"%.1f".format(avgTrim)}%: ნარევი მდიდარია."
         } else {
@@ -107,6 +107,9 @@ class TripRecorder {
     private var distKm = 0f
     private var fuelL = 0f
 
+    val liveDistKm: Float get() = if (active) distKm else 0f
+    val liveFuelL: Float get() = if (active) fuelL else 0f
+
     private fun reset() {
         active = false; start = 0; lastT = 0; lastMovingT = 0; moveMs = 0
         maxSpeed = 0; maxRpm = 0; maxMap = 0; baro = 0; maxLoad = 0f
@@ -145,8 +148,10 @@ class TripRecorder {
                 maxTrim = max(maxTrim, tot)
                 if (tot > 15f) leanN++
             }
-        } else if (s.timeMillis - lastMovingT > 180_000) {
-            return finish()
+        } else {
+            // ქუჩაში გაჩერება (შუქნიშანი) მგზავრობის ნაწილია: ბენზინი იხარჯება, კმ არა
+            fuelLph(s)?.let { fuelL += it * dt / 3_600_000f }
+            if (s.timeMillis - lastMovingT > 180_000) return finish()
         }
         return null
     }
@@ -175,9 +180,9 @@ class TripRecorder {
 }
 
 /** ბოლო მგზავრობების საშუალო ხარჯი ლ/100 კმ (დარჩენილი კილომეტრაჟის შესაფასებლად). */
-fun avgConsumption(trips: List<TripSummary>): Float? {
+fun avgConsumption(trips: List<TripSummary>, extraKm: Float = 0f, extraL: Float = 0f): Float? {
     val good = trips.takeLast(5).filter { it.distKm >= 2f && it.fuelL > 0f }
-    val d = good.sumOf { it.distKm.toDouble() }
-    val f = good.sumOf { it.fuelL.toDouble() }
+    val d = good.sumOf { it.distKm.toDouble() } + extraKm
+    val f = good.sumOf { it.fuelL.toDouble() } + extraL
     return if (d >= 2.0 && f > 0.0) (f / d * 100.0).toFloat() else null
 }

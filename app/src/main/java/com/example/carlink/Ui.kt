@@ -162,7 +162,7 @@ private fun Dashboard(vm: CarViewModel, withBluetooth: (() -> Unit) -> Unit) {
             val fp = (if (useSaved) ui.lastSaved?.fuelPercent else snap?.fuelPercent)
             if (fp != null) {
                 val liters = fp * ui.profile.tankL / 100f
-                val avg = avgConsumption(ui.trips)
+                val avg = avgConsumption(ui.trips, ui.curTripKm, ui.curTripL)
                 Spacer4()
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
                     MiniStat("ბაკში (დაახლ.)", "%.1f ლ".format(liters), Modifier.weight(1f))
@@ -172,10 +172,18 @@ private fun Dashboard(vm: CarViewModel, withBluetooth: (() -> Unit) -> Unit) {
                         Modifier.weight(1f),
                     )
                 }
-                val now = if (!useSaved && snap != null) fuelPer100(snap) else null
+                // ახლანდელი ხარჯი: ბოლო ჩვენებების საშუალო, მხოლოდ ≥ 20 კმ/სთ სიჩქარეზე (დაბალ სიჩქარეზე ციფრი უაზროა)
+                val recent = if (!useSaved) ui.live.takeLast(10).mapNotNull { p ->
+                    val l = p.lph
+                    val v = p.speed
+                    if (l != null && v != null && v >= 20) l / v * 100f else null
+                } else emptyList()
+                val now = if (recent.size >= 3) recent.average().toFloat() else null
+                val idle = if (!useSaved && snap != null && (snap.speedKmh ?: 0) < 5) fuelLph(snap) else null
                 Spacer4()
                 Text(
                     when {
+                        idle != null -> "უქმ სვლაზე: %.1f ლ/სთ".format(idle) + (avg?.let { " · საშუალო %.1f ლ/100 კმ".format(it) } ?: "")
                         now != null -> "ახლანდელი ხარჯი: %.1f ლ/100 კმ".format(now)
                         avg != null -> "საშუალო ხარჯი ბოლო მგზავრობებით: %.1f ლ/100 კმ".format(avg)
                         else -> "კმ-ის შეფასებისთვის ჯერ რამდენიმე კმ გაიარე ჩართული აპით"
@@ -357,7 +365,7 @@ private fun Dashboard(vm: CarViewModel, withBluetooth: (() -> Unit) -> Unit) {
                 Text("ბოლო მგზავრობა · ${fmt.format(Date(last.start))} · ${last.moveSec / 60} წთ", color = TextMain, fontSize = 14.sp)
                 Spacer4()
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                    MiniStat("მაქს. ბუსტი", if (last.maxMap > 0) "+${last.maxBoost} kPa" else "—", Modifier.weight(1f))
+                    MiniStat("მაქს. ბუსტი", if (last.maxMap > 0) "%+d kPa".format(last.maxBoost) else "—", Modifier.weight(1f))
                     MiniStat("მაქს. MAP", if (last.maxMap > 0) "${last.maxMap} kPa" else "—", Modifier.weight(1f))
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth().padding(top = 10.dp)) {
@@ -383,7 +391,7 @@ private fun Dashboard(vm: CarViewModel, withBluetooth: (() -> Unit) -> Unit) {
                     Text("წინა მგზავრობები", color = Muted, fontSize = 12.sp)
                     ui.trips.dropLast(1).takeLast(5).reversed().forEach { t ->
                         Text(
-                            "${fmt.format(Date(t.start))} · ბუსტი ${if (t.maxMap > 0) "+${t.maxBoost}" else "—"} kPa · კორექცია %+.1f%%".format(t.avgTrim),
+                            "${fmt.format(Date(t.start))} · ბუსტი ${if (t.maxMap > 0) "%+d".format(t.maxBoost) else "—"} kPa · კორექცია %+.1f%%".format(t.avgTrim),
                             color = TextMain, fontSize = 12.sp,
                         )
                     }
