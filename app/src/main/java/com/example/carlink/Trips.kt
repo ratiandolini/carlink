@@ -159,7 +159,20 @@ class TripRecorder {
     /** ძალით დასრულება (კავშირი გაწყდა). მოკლე მგზავრობებს (< 60 წმ) არ ინახავს. */
     fun finish(): TripSummary? {
         if (!active) return null
-        val sum = TripSummary(
+        val sum = build()
+        reset()
+        return if (sum.moveSec >= 60) sum else null
+    }
+
+    /** მიმდინარე მგზავრობის ასლი დასრულების გარეშე (შუალედური შენახვისთვის). */
+    fun peek(): TripSummary? {
+        if (!active) return null
+        val sum = build()
+        return if (sum.moveSec >= 60) sum else null
+    }
+
+    private fun build(): TripSummary {
+        return TripSummary(
             start = start,
             end = lastT,
             moveSec = (moveMs / 1000).toInt(),
@@ -174,8 +187,6 @@ class TripRecorder {
             distKm = distKm,
             fuelL = fuelL,
         )
-        reset()
-        return if (sum.moveSec >= 60) sum else null
     }
 }
 

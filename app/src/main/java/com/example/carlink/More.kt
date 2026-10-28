@@ -666,8 +666,10 @@ private fun RefuelCard(ui: UiState, vm: CarViewModel) {
                 },
                 contentPadding = BtnPad,
             ) { BtnText("დამატება") }
-            ui.snapshot?.fuelPercent?.let { cur ->
-                OutlinedButton(onClick = { after = "%.0f".format(cur) }, contentPadding = BtnPad) { BtnText("ახლანდელი: %.0f%%".format(cur)) }
+            (ui.fuelRest ?: ui.snapshot?.fuelPercent)?.let { cur ->
+                OutlinedButton(onClick = { after = "%.0f".format(cur) }, contentPadding = BtnPad) {
+                    BtnText((if (ui.fuelRest != null) "გაჩერებისას: %.0f%%" else "ახლანდელი: %.0f%%").format(cur))
+                }
             }
         }
         if (ui.refuels.isNotEmpty()) {

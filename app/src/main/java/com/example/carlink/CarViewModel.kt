@@ -52,6 +52,7 @@ data class UiState(
     val curTripL: Float = 0f,
     val refuels: List<RefuelItem> = emptyList(),
     val cold: ColdStart? = null,
+    val fuelRest: Float? = null,
 )
 
 data class ExplorerState(
@@ -98,7 +99,37 @@ class CarViewModel(app: Application) : AndroidViewModel(app) {
     private var coolantAlert = false
     private var knownDtcs: Set<String> = loadSaved()?.dtcs?.toSet() ?: emptySet()
 
+    private var stillSince = 0L
+    private var lastWipAt = 0L
+
+    /** თუ აპი მგზავრობის დროს დაიხურა, შუალედური ჩანაწერიდან მგზავრობას აღვადგენთ. */
+    private fun recoverTrip() {
+        val line = prefs.getString("trip_wip", null) ?: return
+        prefs.edit().remove("trip_wip").apply()
+        val t = TripSummary.fromLine(line) ?: return
+        if (t.moveSec >= 60) saveTrip(t)
+    }
+
+    private fun saveWip() {
+        val t = recorder.peek()
+        if (t != null) prefs.edit().putString("trip_wip", t.toLine()).apply()
+    }
+
+    /** გაჩერებულ მანქანაზე ბენზინის დონე უფრო სანდოა, ვიდრე მოძრაობისას. */
+    private fun trackRest(snap: CarSnapshot) {
+        val f = snap.fuelPercent
+        if (f == null || (snap.speedKmh ?: 0) != 0) { stillSince = 0L; return }
+        if (stillSince == 0L) stillSince = snap.timeMillis
+        if (snap.timeMillis - stillSince < 20_000L) return
+        if (_state.value.fuelRest != f) {
+            prefs.edit().putFloat("fuel_rest", f).apply()
+            _state.update { it.copy(fuelRest = f) }
+        }
+    }
+
     init {
+        recoverTrip()
+        _state.update { it.copy(fuelRest = prefs.getFloat("fuel_rest", -1f).takeIf { v -> v >= 0f }) }
         viewModelScope.launch {
             val h = withContext(Dispatchers.IO) { history.load() }
             val l = withContext(Dispatchers.IO) { dtcLog.load() }
@@ -563,6 +594,12 @@ class CarViewModel(app: Application) : AndroidViewModel(app) {
                         trackCold(snap)
                         maybeLogHistory(snap)
                         recorder.update(snap)?.let { saveTrip(it) }
+                        trackRest(snap)
+                        if (recorder.active) {
+                            if (snap.timeMillis - lastWipAt > 30_000L) { lastWipAt = snap.timeMillis; saveWip() }
+                        } else if (prefs.contains("trip_wip")) {
+                            prefs.edit().remove("trip_wip").apply()
+                        }
                     } else {
                         recorder.finish()?.let { saveTrip(it) }
                     }
@@ -593,6 +630,7 @@ class CarViewModel(app: Application) : AndroidViewModel(app) {
             }
         } finally {
             recorder.finish()?.let { saveTrip(it) }
+            prefs.edit().remove("trip_wip").apply()
             endCold(System.currentTimeMillis())
             _state.update { it.copy(tripActive = false, curTripKm = 0f, curTripL = 0f) }
             source = null
